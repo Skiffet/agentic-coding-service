@@ -1,0 +1,765 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Agentic Coding Service</title>
+<style>
+  :root {
+    --bg: #f3f4f7;
+    --surface: #ffffff;
+    --surface-2: #f8f9fb;
+    --border: #e3e6eb;
+    --text: #16181d;
+    --text-muted: #6b7280;
+    --text-faint: #9aa1ab;
+    --accent: #4f46e5;
+    --accent-soft: #eef0fe;
+    --accent-text: #ffffff;
+    --code-bg: #0f1117;
+    --code-text: #e5e7eb;
+    --success: #16a34a;
+    --success-bg: #dcfce7;
+    --error: #dc2626;
+    --error-bg: #fee2e2;
+    --warn: #b45309;
+    --warn-bg: #fef3c7;
+    --neutral: #6b7280;
+    --neutral-bg: #eef0f3;
+    --tool-rag: #7c3aed;
+    --tool-web: #0891b2;
+    --tool-write: #0d9488;
+    --tool-test: #ea580c;
+    --shadow: 0 1px 2px rgba(16,18,23,0.04), 0 8px 24px rgba(16,18,23,0.04);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #101216;
+      --surface: #191c22;
+      --surface-2: #14161b;
+      --border: #2a2e37;
+      --text: #edeef1;
+      --text-muted: #9aa1ab;
+      --text-faint: #6b7280;
+      --accent: #8b85f4;
+      --accent-soft: #23213f;
+      --accent-text: #101216;
+      --code-bg: #0a0b0f;
+      --code-text: #d7dae0;
+      --success: #4ade80;
+      --success-bg: #12311d;
+      --error: #f87171;
+      --error-bg: #391616;
+      --warn: #fbbf24;
+      --warn-bg: #362a0c;
+      --neutral: #9aa1ab;
+      --neutral-bg: #21242b;
+      --tool-rag: #a78bfa;
+      --tool-web: #22d3ee;
+      --tool-write: #2dd4bf;
+      --tool-test: #fb923c;
+      --shadow: 0 1px 2px rgba(0,0,0,0.2), 0 8px 24px rgba(0,0,0,0.3);
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+    -webkit-font-smoothing: antialiased;
+  }
+  main { max-width: 880px; margin: 0 auto; padding: 40px 20px 100px; }
+
+  header { margin-bottom: 28px; }
+  .eyebrow {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-size: 0.72rem; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase;
+    color: var(--accent); margin-bottom: 10px;
+  }
+  .eyebrow .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
+  h1 { font-size: 1.7rem; margin: 0 0 6px; letter-spacing: -0.01em; }
+  .subtitle { color: var(--text-muted); font-size: 0.95rem; margin: 0 0 14px; max-width: 62ch; line-height: 1.5; }
+
+  .tool-legend { display: flex; flex-wrap: wrap; gap: 8px; }
+  .tool-pill {
+    display: inline-flex; align-items: center; gap: 5px;
+    font-size: 0.72rem; font-weight: 600;
+    padding: 4px 10px 4px 8px; border-radius: 999px;
+    background: var(--surface-2); border: 1px solid var(--border); color: var(--text-muted);
+  }
+  .tool-pill svg { width: 12px; height: 12px; }
+  .tool-pill.rag { color: var(--tool-rag); }
+  .tool-pill.web { color: var(--tool-web); }
+  .tool-pill.write { color: var(--tool-write); }
+  .tool-pill.test { color: var(--tool-test); }
+
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 22px;
+    margin-bottom: 18px;
+    box-shadow: var(--shadow);
+  }
+
+  textarea {
+    width: 100%;
+    min-height: 100px;
+    padding: 13px 14px;
+    border-radius: 10px;
+    border: 1px solid var(--border);
+    background: var(--surface-2);
+    color: var(--text);
+    font-family: inherit;
+    font-size: 0.95rem;
+    line-height: 1.5;
+    resize: vertical;
+    transition: border-color 0.15s;
+  }
+  textarea:focus { outline: none; border-color: var(--accent); background: var(--surface); }
+  textarea::placeholder { color: var(--text-faint); }
+
+  .examples-label { font-size: 0.75rem; color: var(--text-faint); margin: 12px 0 6px; }
+  .examples { display: flex; flex-wrap: wrap; gap: 8px; }
+  .example-chip {
+    font-size: 0.8rem;
+    padding: 6px 12px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    background: var(--surface-2);
+    color: var(--text-muted);
+    cursor: pointer;
+    transition: all 0.15s;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  }
+  .example-chip:hover { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+
+  .actions { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; margin-top: 16px; }
+  .hint { font-size: 0.76rem; color: var(--text-faint); }
+  .hint kbd {
+    font-family: inherit; font-size: 0.72rem; background: var(--surface-2);
+    border: 1px solid var(--border); border-radius: 4px; padding: 1px 5px;
+  }
+  button.primary {
+    background: var(--accent);
+    color: var(--accent-text);
+    border: none;
+    border-radius: 9px;
+    padding: 11px 20px;
+    font-size: 0.92rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: filter 0.15s, transform 0.1s;
+  }
+  button.primary:disabled { opacity: 0.55; cursor: not-allowed; }
+  button.primary:hover:not(:disabled) { filter: brightness(1.1); }
+  button.primary:active:not(:disabled) { transform: scale(0.98); }
+
+  /* Progress / stepper */
+  #progress-card { display: none; }
+  #progress-card.active { display: block; }
+  .progress-header { display: flex; align-items: center; gap: 10px; margin-bottom: 18px; }
+  .spinner {
+    width: 16px; height: 16px; flex: none;
+    border: 2px solid var(--border);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .progress-title { font-weight: 600; font-size: 0.92rem; }
+  .progress-sub { font-size: 0.8rem; color: var(--text-faint); margin-top: 1px; }
+  .elapsed-badge {
+    margin-left: auto; font-family: ui-monospace, monospace; font-size: 0.8rem;
+    color: var(--text-muted); background: var(--surface-2); border: 1px solid var(--border);
+    padding: 3px 9px; border-radius: 999px;
+  }
+
+  .stepper { display: flex; align-items: center; }
+  .step { display: flex; flex-direction: column; align-items: center; gap: 8px; flex: 1; position: relative; }
+  .step-icon {
+    width: 34px; height: 34px; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    background: var(--surface-2); border: 2px solid var(--border);
+    color: var(--text-faint);
+    transition: all 0.25s;
+  }
+  .step-icon svg { width: 16px; height: 16px; }
+  .step-label { font-size: 0.72rem; color: var(--text-faint); font-weight: 600; transition: color 0.25s; }
+  .step-line { position: absolute; top: 17px; left: 50%; width: 100%; height: 2px; background: var(--border); z-index: 0; }
+  .step:last-child .step-line { display: none; }
+  .step.active .step-icon { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); box-shadow: 0 0 0 4px var(--accent-soft); }
+  .step.active .step-label { color: var(--accent); }
+  .step.done .step-icon { border-color: var(--success); color: var(--success); background: var(--success-bg); }
+  .step.done .step-line { background: var(--success); }
+  .progress-note { font-size: 0.76rem; color: var(--text-faint); margin-top: 16px; text-align: center; }
+
+  #results, #empty-state { display: none; }
+  #results.active, #empty-state.active { display: block; }
+
+  .empty-state {
+    text-align: center; padding: 50px 20px; color: var(--text-faint);
+  }
+  .empty-state svg { width: 40px; height: 40px; margin-bottom: 12px; opacity: 0.5; }
+  .empty-state p { font-size: 0.88rem; margin: 0; }
+
+  .status-hero {
+    display: flex; align-items: center; gap: 14px;
+  }
+  .status-icon {
+    width: 42px; height: 42px; border-radius: 12px; flex: none;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .status-icon svg { width: 22px; height: 22px; }
+  .status-icon.success { background: var(--success-bg); color: var(--success); }
+  .status-icon.error { background: var(--error-bg); color: var(--error); }
+  .status-icon.max_iterations_reached { background: var(--warn-bg); color: var(--warn); }
+  .status-icon.timeout { background: var(--neutral-bg); color: var(--neutral); }
+  .status-title { font-weight: 700; font-size: 1.05rem; text-transform: capitalize; }
+  .status-desc { font-size: 0.82rem; color: var(--text-muted); margin-top: 2px; }
+
+  .stat-row { display: flex; gap: 10px; margin-top: 16px; }
+  .stat {
+    flex: 1; background: var(--surface-2); border: 1px solid var(--border);
+    border-radius: 10px; padding: 10px 12px;
+  }
+  .stat-label { font-size: 0.68rem; color: var(--text-faint); text-transform: uppercase; letter-spacing: 0.04em; font-weight: 600; }
+  .stat-value {
+    font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 0.82rem; margin-top: 3px;
+    color: var(--text); word-break: break-all;
+  }
+
+  h2 { font-size: 1rem; margin: 0 0 14px; display: flex; align-items: center; gap: 8px; }
+  h2 svg { width: 16px; height: 16px; color: var(--text-faint); }
+
+  .test-banner {
+    display: flex; align-items: center; gap: 10px;
+    padding: 10px 14px; border-radius: 10px; margin-bottom: 12px; font-size: 0.85rem; font-weight: 600;
+  }
+  .test-banner.pass { background: var(--success-bg); color: var(--success); }
+  .test-banner.fail { background: var(--error-bg); color: var(--error); }
+  .test-banner svg { width: 16px; height: 16px; flex: none; }
+
+  .code-block { position: relative; border-radius: 10px; overflow: hidden; background: var(--code-bg); }
+  .code-block .copy-btn {
+    position: absolute; top: 8px; right: 8px;
+    font-size: 0.7rem; padding: 4px 9px; border-radius: 6px;
+    background: rgba(255,255,255,0.08); color: var(--code-text); border: 1px solid rgba(255,255,255,0.12);
+    cursor: pointer; opacity: 0; transition: opacity 0.15s;
+  }
+  .code-block:hover .copy-btn { opacity: 1; }
+  .code-block .copy-btn:hover { background: rgba(255,255,255,0.16); }
+  pre {
+    margin: 0; padding: 14px;
+    background: transparent; color: var(--code-text);
+    overflow-x: auto; font-size: 0.8rem; line-height: 1.55;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    white-space: pre-wrap; word-break: break-word;
+  }
+  .tok-keyword { color: #ff7ab2; }
+  .tok-string { color: #a5e075; }
+  .tok-comment { color: #7f8a9a; font-style: italic; }
+  .tok-number { color: #f2c46d; }
+
+  .file-item { border: 1px solid var(--border); border-radius: 10px; margin-bottom: 8px; overflow: hidden; }
+  .file-header {
+    display: flex; align-items: center; gap: 8px;
+    padding: 10px 14px; cursor: pointer; background: var(--surface-2);
+    font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 0.83rem;
+  }
+  .file-header:hover { background: var(--accent-soft); }
+  .file-header svg.chevron { width: 13px; height: 13px; margin-left: auto; color: var(--text-faint); transition: transform 0.15s; flex: none; }
+  .file-header.open svg.chevron { transform: rotate(90deg); }
+  .file-header svg.file-icon { width: 14px; height: 14px; color: var(--text-faint); flex: none; }
+  .file-body { display: none; }
+  .file-body.open { display: block; }
+  .file-body .code-block { border-radius: 0; }
+
+  .empty-note { color: var(--text-faint); font-size: 0.85rem; }
+
+  /* Trace timeline */
+  .timeline { position: relative; }
+  .phase-group { margin-bottom: 4px; }
+  .phase-title {
+    font-size: 0.72rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em;
+    color: var(--text-faint); margin: 18px 0 10px; padding-left: 40px;
+  }
+  .phase-title:first-child { margin-top: 0; }
+  .trace-item { display: flex; gap: 12px; position: relative; }
+  .trace-rail { display: flex; flex-direction: column; align-items: center; width: 28px; flex: none; }
+  .trace-dot {
+    width: 26px; height: 26px; border-radius: 50%; flex: none;
+    display: flex; align-items: center; justify-content: center;
+    background: var(--surface-2); border: 1px solid var(--border); z-index: 1;
+  }
+  .trace-dot svg { width: 13px; height: 13px; }
+  .trace-dot.rag { color: var(--tool-rag); }
+  .trace-dot.web { color: var(--tool-web); }
+  .trace-dot.write { color: var(--tool-write); }
+  .trace-dot.test-pass { color: var(--success); }
+  .trace-dot.test-fail { color: var(--error); }
+  .trace-dot.warn { color: var(--warn); }
+  .trace-line { width: 2px; flex: 1; background: var(--border); margin: 2px 0; min-height: 8px; }
+  .trace-item:last-child .trace-line { display: none; }
+  .trace-content { flex: 1; padding-bottom: 16px; min-width: 0; }
+  .trace-summary {
+    display: flex; align-items: center; gap: 8px; cursor: pointer; padding-top: 3px;
+    font-size: 0.84rem;
+  }
+  .trace-summary:hover .trace-label { color: var(--accent); }
+  .trace-label { font-weight: 600; }
+  .trace-iter { font-size: 0.72rem; color: var(--text-faint); font-family: ui-monospace, monospace; }
+  .trace-chevron { width: 12px; height: 12px; color: var(--text-faint); margin-left: auto; transition: transform 0.15s; flex: none; }
+  .trace-summary.open .trace-chevron { transform: rotate(90deg); }
+  .trace-detail { display: none; margin-top: 8px; }
+  .trace-detail.open { display: block; }
+  .trace-detail pre { font-size: 0.75rem; border-radius: 8px; background: var(--code-bg); }
+
+  .error-banner {
+    display: none; align-items: center; gap: 10px;
+    background: var(--error-bg); color: var(--error);
+    border-radius: 10px; padding: 12px 14px; font-size: 0.88rem; margin-bottom: 16px;
+  }
+  .error-banner.active { display: flex; }
+  .error-banner svg { width: 16px; height: 16px; flex: none; }
+
+  @media (max-width: 520px) {
+    .step-label { display: none; }
+    .stat-row { flex-direction: column; }
+  }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <div class="eyebrow"><span class="dot"></span>Local agent · Ollama + qwen2.5-coder</div>
+    <h1>Agentic Coding Service</h1>
+    <p class="subtitle">Describe what you want built. The agent writes tests first, then implements code, running <code>pytest</code> and searching for context until the tests pass.</p>
+    <div class="tool-legend">
+      <span class="tool-pill rag" data-icon="rag">rag_search</span>
+      <span class="tool-pill web" data-icon="web">web_search</span>
+      <span class="tool-pill write" data-icon="write">write_code</span>
+      <span class="tool-pill test" data-icon="test">run_tests</span>
+    </div>
+  </header>
+
+  <div class="card">
+    <textarea id="requirement" placeholder="e.g. Write a function is_palindrome(s) that returns True if a string is a palindrome (ignoring case and spaces), with a passing pytest test."></textarea>
+    <div class="examples-label">Try an example</div>
+    <div class="examples">
+      <span class="example-chip" data-text="Write a function add(a, b) that returns the sum of two numbers, with a passing pytest test.">add(a, b)</span>
+      <span class="example-chip" data-text="Write a function fibonacci(n) that returns the nth Fibonacci number, with a passing pytest test.">fibonacci(n)</span>
+      <span class="example-chip" data-text="Write a function is_palindrome(s) that returns True if a string is a palindrome (ignoring case and spaces), with a passing pytest test.">is_palindrome(s)</span>
+      <span class="example-chip" data-text="Write a function flatten(nested_list) that flattens an arbitrarily nested list of integers into a single flat list, with a passing pytest test.">flatten(list)</span>
+    </div>
+    <div class="actions">
+      <button class="primary" id="submit-btn">Generate Code</button>
+      <span class="hint"><kbd>Ctrl</kbd>+<kbd>Enter</kbd> to submit</span>
+    </div>
+  </div>
+
+  <div class="error-banner" id="error-banner"></div>
+
+  <div class="card" id="progress-card">
+    <div class="progress-header">
+      <div class="spinner"></div>
+      <div>
+        <div class="progress-title">Agent is working</div>
+        <div class="progress-sub">This is a real multi-step loop — it can take a few minutes</div>
+      </div>
+      <div class="elapsed-badge"><span id="elapsed">0s</span></div>
+    </div>
+    <div class="stepper" id="stepper"></div>
+    <div class="progress-note">Steps cycle to illustrate the agent's typical workflow — the loop may repeat write/test several times before finishing.</div>
+  </div>
+
+  <div class="empty-state" id="empty-state">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M9.75 3.104v5.714a2.25 2.25 0 01-.659 1.591L5 14.5M9.75 3.104c-.251.023-.501.05-.75.082m.75-.082a24.301 24.301 0 014.5 0m0 0v5.714c0 .597.237 1.17.659 1.591L19.8 15.3M14.25 3.104c.251.023.501.05.75.082M19.8 15.3l-1.57.393A9.065 9.065 0 0112 15a9.065 9.065 0 00-6.23-.693L5 14.5m14.8.8l1.402 1.402c1.232 1.232.65 3.318-1.067 3.611A48.309 48.309 0 0112 21c-2.773 0-5.491-.235-8.135-.687-1.718-.293-2.3-2.379-1.067-3.61L5 14.5"/></svg>
+    <p>Run something above and the result will show up here.</p>
+  </div>
+
+  <div id="results">
+    <div class="card">
+      <div class="status-hero">
+        <div class="status-icon" id="status-icon"></div>
+        <div>
+          <div class="status-title" id="status-title"></div>
+          <div class="status-desc" id="status-desc"></div>
+        </div>
+      </div>
+      <div class="stat-row">
+        <div class="stat">
+          <div class="stat-label">Session</div>
+          <div class="stat-value" id="meta-session"></div>
+        </div>
+        <div class="stat">
+          <div class="stat-label">Iterations</div>
+          <div class="stat-value" id="meta-iterations"></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card" id="test-result-card">
+      <h2>Test result</h2>
+      <div id="test-banner" class="test-banner"></div>
+      <div class="code-block">
+        <button class="copy-btn" data-copy-target="test-output">Copy</button>
+        <pre id="test-output"></pre>
+      </div>
+    </div>
+
+    <div class="card" id="files-card">
+      <h2>Generated files</h2>
+      <div id="files-list"></div>
+    </div>
+
+    <div class="card">
+      <h2>Trace log</h2>
+      <div class="timeline" id="trace-list"></div>
+    </div>
+  </div>
+</main>
+
+<script>
+(function () {
+  // ---------------------------------------------------------------------
+  // Icons (inline SVG strings, stroke-based, currentColor)
+  // ---------------------------------------------------------------------
+  const ICONS = {
+    rag: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path stroke-linecap="round" d="M21 21l-4.3-4.3"/></svg>',
+    web: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path stroke-linecap="round" d="M3 12h18M12 3c2.5 2.7 3.8 6 3.8 9s-1.3 6.3-3.8 9c-2.5-2.7-3.8-6-3.8-9s1.3-6.3 3.8-9z"/></svg>',
+    write: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 20h9M16.5 3.5a2.1 2.1 0 013 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>',
+    test: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>',
+    file: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><path stroke-linecap="round" stroke-linejoin="round" d="M14 2v6h6"/></svg>',
+    chevron: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7"/></svg>',
+    check: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M20 6L9 17l-5-5"/></svg>',
+    x: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M18 6L6 18M6 6l12 12"/></svg>',
+    alertTriangle: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><path stroke-linecap="round" d="M12 9v4M12 17h.01"/></svg>',
+    clock: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path stroke-linecap="round" stroke-linejoin="round" d="M12 7v5l3 3"/></svg>',
+    zap: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M13 2L3 14h7l-1 8 10-12h-7l1-8z"/></svg>',
+    list: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></svg>',
+  };
+
+  Array.from(document.querySelectorAll("[data-icon]")).forEach(function (el) {
+    el.insertAdjacentHTML("afterbegin", ICONS[el.getAttribute("data-icon")] || "");
+  });
+
+  const STATUS_META = {
+    success: { icon: "check", title: "Success", desc: "The frozen tests passed." },
+    error: { icon: "x", title: "Error", desc: "The agent hit an unrecoverable error." },
+    max_iterations_reached: { icon: "alertTriangle", title: "Max iterations reached", desc: "Ran out of iterations before the tests passed." },
+    timeout: { icon: "clock", title: "Timeout", desc: "The request exceeded the server's time budget." },
+  };
+
+  const TOOL_META = {
+    rag_search: { icon: "rag", cls: "rag", label: "rag_search" },
+    web_search: { icon: "web", cls: "web", label: "web_search" },
+    write_code: { icon: "write", cls: "write", label: "write_code" },
+    run_tests: { icon: "test", cls: "test-pass", label: "run_tests" },
+  };
+
+  // ---------------------------------------------------------------------
+  // Elements
+  // ---------------------------------------------------------------------
+  const requirementEl = document.getElementById("requirement");
+  const submitBtn = document.getElementById("submit-btn");
+  const progressCard = document.getElementById("progress-card");
+  const elapsedEl = document.getElementById("elapsed");
+  const errorBanner = document.getElementById("error-banner");
+  const resultsEl = document.getElementById("results");
+  const emptyState = document.getElementById("empty-state");
+  const stepperEl = document.getElementById("stepper");
+
+  document.querySelectorAll(".example-chip").forEach(function (chip) {
+    chip.addEventListener("click", function () {
+      requirementEl.value = chip.getAttribute("data-text");
+      requirementEl.focus();
+    });
+  });
+
+  // ---------------------------------------------------------------------
+  // Stepper (illustrative — the backend is a single blocking call, so this
+  // cycles on a timer rather than reflecting a literal live status)
+  // ---------------------------------------------------------------------
+  const STEPS = [
+    { key: "search", label: "Search", icon: "rag" },
+    { key: "write", label: "Write", icon: "write" },
+    { key: "test", label: "Test", icon: "test" },
+    { key: "iterate", label: "Iterate", icon: "zap" },
+  ];
+  STEPS.forEach(function (step, i) {
+    const el = document.createElement("div");
+    el.className = "step";
+    el.id = "step-" + step.key;
+    el.innerHTML =
+      '<div class="step-icon">' + ICONS[step.icon] + (i < STEPS.length - 1 ? '<div class="step-line"></div>' : "") + "</div>" +
+      '<div class="step-label">' + step.label + "</div>";
+    stepperEl.appendChild(el);
+  });
+
+  let timerInterval = null, stepInterval = null, startTime = null, stepIndex = 0;
+
+  function setActiveStep(i) {
+    STEPS.forEach(function (step, idx) {
+      const el = document.getElementById("step-" + step.key);
+      el.classList.toggle("active", idx === i);
+      el.classList.toggle("done", idx < i);
+    });
+  }
+
+  function startProgress() {
+    startTime = Date.now();
+    stepIndex = 0;
+    setActiveStep(0);
+    progressCard.classList.add("active");
+    timerInterval = setInterval(function () {
+      elapsedEl.textContent = Math.floor((Date.now() - startTime) / 1000) + "s";
+    }, 500);
+    stepInterval = setInterval(function () {
+      stepIndex = (stepIndex + 1) % STEPS.length;
+      setActiveStep(stepIndex);
+    }, 3500);
+  }
+
+  function stopProgress() {
+    clearInterval(timerInterval);
+    clearInterval(stepInterval);
+    progressCard.classList.remove("active");
+  }
+
+  // ---------------------------------------------------------------------
+  // Helpers
+  // ---------------------------------------------------------------------
+  function escapeHtml(str) {
+    const div = document.createElement("div");
+    div.textContent = str == null ? "" : String(str);
+    return div.innerHTML;
+  }
+
+  function highlightPython(code) {
+    const pattern = /(#.*$)|("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')|\b(def|return|if|elif|else|for|while|import|from|class|try|except|finally|with|as|pass|break|continue|in|is|not|and|or|None|True|False|lambda|yield|raise|assert|global|nonlocal|async|await)\b|\b(\d+\.?\d*)\b/gm;
+    let out = "", lastIndex = 0, m;
+    while ((m = pattern.exec(code)) !== null) {
+      out += escapeHtml(code.slice(lastIndex, m.index));
+      if (m[1]) out += '<span class="tok-comment">' + escapeHtml(m[1]) + "</span>";
+      else if (m[2]) out += '<span class="tok-string">' + escapeHtml(m[2]) + "</span>";
+      else if (m[3]) out += '<span class="tok-keyword">' + escapeHtml(m[3]) + "</span>";
+      else if (m[4]) out += '<span class="tok-number">' + escapeHtml(m[4]) + "</span>";
+      lastIndex = pattern.lastIndex;
+    }
+    out += escapeHtml(code.slice(lastIndex));
+    return out;
+  }
+
+  function wireCopyButtons(root) {
+    root.querySelectorAll(".copy-btn").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        const target = document.getElementById(btn.getAttribute("data-copy-target"));
+        if (!target) return;
+        navigator.clipboard.writeText(target.textContent).then(function () {
+          const original = btn.textContent;
+          btn.textContent = "Copied!";
+          setTimeout(function () { btn.textContent = original; }, 1200);
+        });
+      });
+    });
+  }
+
+  // ---------------------------------------------------------------------
+  // Renderers
+  // ---------------------------------------------------------------------
+  function renderStatusHero(status) {
+    const meta = STATUS_META[status] || { icon: "alertTriangle", title: status, desc: "" };
+    document.getElementById("status-icon").className = "status-icon " + status;
+    document.getElementById("status-icon").innerHTML = ICONS[meta.icon];
+    document.getElementById("status-title").textContent = meta.title;
+    document.getElementById("status-desc").textContent = meta.desc;
+  }
+
+  function renderFiles(sessionId, files) {
+    const container = document.getElementById("files-list");
+    container.innerHTML = "";
+    if (!files || files.length === 0) {
+      container.innerHTML = '<p class="empty-note">No files were written.</p>';
+      return;
+    }
+    files.forEach(function (path, idx) {
+      const item = document.createElement("div");
+      item.className = "file-item";
+
+      const header = document.createElement("div");
+      header.className = "file-header";
+      header.innerHTML = ICONS.file.replace("<svg", '<svg class="file-icon"') + "<span>" + escapeHtml(path) + "</span>" + ICONS.chevron.replace("<svg", '<svg class="chevron"');
+
+      const body = document.createElement("div");
+      body.className = "file-body";
+      const codeBlockId = "file-content-" + idx;
+      body.innerHTML =
+        '<div class="code-block"><button class="copy-btn" data-copy-target="' + codeBlockId + '">Copy</button>' +
+        '<pre id="' + codeBlockId + '">Loading…</pre></div>';
+      wireCopyButtons(body);
+
+      let loaded = false;
+      header.addEventListener("click", function () {
+        const isOpen = body.classList.toggle("open");
+        header.classList.toggle("open", isOpen);
+        if (!loaded && isOpen) {
+          loaded = true;
+          const pre = document.getElementById(codeBlockId);
+          fetch("/sessions/" + encodeURIComponent(sessionId) + "/files/" + path)
+            .then(function (r) { return r.json(); })
+            .then(function (data) {
+              const content = data.content !== undefined ? data.content : (data.detail || "Could not load file.");
+              pre.innerHTML = highlightPython(content);
+            })
+            .catch(function () { pre.textContent = "Failed to load file."; });
+        }
+      });
+
+      item.appendChild(header);
+      item.appendChild(body);
+      container.appendChild(item);
+    });
+  }
+
+  function renderTestResult(testResult) {
+    const card = document.getElementById("test-result-card");
+    if (!testResult) { card.style.display = "none"; return; }
+    card.style.display = "block";
+
+    const passed = testResult.exit_code === 0;
+    const banner = document.getElementById("test-banner");
+    banner.className = "test-banner " + (passed ? "pass" : "fail");
+    banner.innerHTML = (passed ? ICONS.check : ICONS.x) +
+      "<span>" + (passed ? "Passed" : "Failed") + " — exit code " + testResult.exit_code + "</span>";
+
+    document.getElementById("test-output").textContent =
+      (testResult.stdout || "") + (testResult.stderr ? "\n" + testResult.stderr : "");
+  }
+
+  function renderTrace(trace) {
+    const container = document.getElementById("trace-list");
+    container.innerHTML = "";
+    let currentPhase = null;
+    const entries = (trace || []).filter(function (e) { return e.event; });
+
+    entries.forEach(function (entry, idx) {
+      if (entry.phase && entry.phase !== currentPhase) {
+        currentPhase = entry.phase;
+        const title = document.createElement("div");
+        title.className = "phase-title";
+        title.textContent = currentPhase.replace(/_/g, " ");
+        container.appendChild(title);
+      }
+
+      const item = document.createElement("div");
+      item.className = "trace-item";
+
+      let dotCls = "rag", icon = ICONS.rag;
+      if (entry.tool && TOOL_META[entry.tool]) {
+        const tm = TOOL_META[entry.tool];
+        icon = ICONS[tm.icon];
+        dotCls = tm.cls;
+        if (entry.tool === "run_tests" && entry.output && typeof entry.output.exit_code === "number") {
+          dotCls = entry.output.exit_code === 0 ? "test-pass" : "test-fail";
+        }
+      } else if (entry.event === "malformed_tool_call" || entry.event === "rejected_tool_call") {
+        icon = ICONS.alertTriangle; dotCls = "warn";
+      } else if (entry.event === "llm_error" || entry.event === "abort") {
+        icon = ICONS.x; dotCls = "test-fail";
+      } else {
+        icon = ICONS.list;
+      }
+
+      const rail = document.createElement("div");
+      rail.className = "trace-rail";
+      rail.innerHTML = '<div class="trace-dot ' + dotCls + '">' + icon + "</div><div class=\"trace-line\"></div>";
+
+      const content = document.createElement("div");
+      content.className = "trace-content";
+
+      const iter = entry.iteration !== undefined ? "#" + entry.iteration : "";
+      const label = entry.tool ? entry.tool : entry.event.replace(/_/g, " ");
+
+      const summary = document.createElement("div");
+      summary.className = "trace-summary";
+      summary.innerHTML =
+        '<span class="trace-label">' + escapeHtml(label) + "</span>" +
+        '<span class="trace-iter">' + escapeHtml(iter) + "</span>" +
+        ICONS.chevron.replace("<svg", '<svg class="trace-chevron"');
+
+      const detail = document.createElement("div");
+      detail.className = "trace-detail";
+      const pre = document.createElement("pre");
+      const copy = Object.assign({}, entry);
+      delete copy.phase;
+      pre.textContent = JSON.stringify(copy, null, 2);
+      detail.appendChild(pre);
+
+      summary.addEventListener("click", function () {
+        const open = detail.classList.toggle("open");
+        summary.classList.toggle("open", open);
+      });
+
+      content.appendChild(summary);
+      content.appendChild(detail);
+      item.appendChild(rail);
+      item.appendChild(content);
+      container.appendChild(item);
+    });
+  }
+
+  // ---------------------------------------------------------------------
+  // Submit flow
+  // ---------------------------------------------------------------------
+  async function submit() {
+    const requirement = requirementEl.value.trim();
+    if (!requirement) { requirementEl.focus(); return; }
+
+    submitBtn.disabled = true;
+    errorBanner.classList.remove("active");
+    resultsEl.classList.remove("active");
+    emptyState.classList.remove("active");
+    startProgress();
+
+    try {
+      const response = await fetch("/generate-code", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ requirement: requirement }),
+      });
+
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || "Request failed with status " + response.status);
+
+      document.getElementById("meta-session").textContent = data.session_id;
+      document.getElementById("meta-iterations").textContent = data.iterations;
+      renderStatusHero(data.status);
+      renderTestResult(data.test_result);
+      renderFiles(data.session_id, data.files);
+      renderTrace(data.trace_log);
+      wireCopyButtons(document.getElementById("test-result-card"));
+
+      resultsEl.classList.add("active");
+    } catch (err) {
+      errorBanner.innerHTML = ICONS.alertTriangle + "<span>" + escapeHtml(err.message) + "</span>";
+      errorBanner.classList.add("active");
+      emptyState.classList.add("active");
+    } finally {
+      stopProgress();
+      submitBtn.disabled = false;
+    }
+  }
+
+  submitBtn.addEventListener("click", submit);
+  requirementEl.addEventListener("keydown", function (e) {
+    if ((e.metaKey || e.ctrlKey) && e.key === "Enter") submit();
+  });
+
+  emptyState.classList.add("active");
+})();
+</script>
+</body>
+</html>
