@@ -70,7 +70,79 @@
     min-height: 100vh;
     -webkit-font-smoothing: antialiased;
   }
-  main { max-width: 880px; margin: 0 auto; padding: 40px 20px 100px; }
+
+  .app-layout { display: flex; min-height: 100vh; }
+
+  .sidebar {
+    width: 272px; flex: none;
+    background: var(--surface-2);
+    border-right: 1px solid var(--border);
+    display: flex; flex-direction: column;
+    height: 100vh; position: sticky; top: 0;
+  }
+  .sidebar-header { padding: 16px; border-bottom: 1px solid var(--border); flex: none; }
+  .new-chat-btn {
+    width: 100%; display: flex; align-items: center; gap: 8px; justify-content: center;
+    padding: 9px 12px; border-radius: 9px; border: 1px solid var(--border);
+    background: var(--surface); color: var(--text); font-size: 0.85rem; font-weight: 600;
+    cursor: pointer; transition: all 0.15s;
+  }
+  .new-chat-btn:hover { border-color: var(--accent); color: var(--accent); }
+  .new-chat-btn svg { width: 14px; height: 14px; }
+
+  .history-list { flex: 1; overflow-y: auto; padding: 10px; }
+  .history-empty { color: var(--text-faint); font-size: 0.8rem; padding: 12px 8px; text-align: center; }
+  .history-item {
+    position: relative;
+    padding: 9px 26px 9px 10px; border-radius: 8px; cursor: pointer; margin-bottom: 2px;
+    border: 1px solid transparent;
+  }
+  .history-item:hover { background: var(--surface); }
+  .history-item.active { background: var(--accent-soft); border-color: var(--accent); }
+  .history-item-req {
+    font-size: 0.82rem; color: var(--text); line-height: 1.35;
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+  }
+  .history-delete-btn {
+    display: none; align-items: center; justify-content: center;
+    position: absolute; top: 8px; right: 6px; width: 22px; height: 22px;
+    border-radius: 6px; border: none; background: transparent; color: var(--text-faint);
+    cursor: pointer; padding: 0;
+  }
+  .history-item:hover .history-delete-btn { display: flex; }
+  .history-delete-btn:hover { background: var(--error-bg); color: var(--error); }
+  .history-delete-btn svg { width: 13px; height: 13px; }
+  .history-item-meta { display: flex; align-items: center; gap: 6px; margin-top: 5px; }
+  .history-dot { width: 6px; height: 6px; border-radius: 50%; flex: none; background: var(--neutral); }
+  .history-dot.success { background: var(--success); }
+  .history-dot.error { background: var(--error); }
+  .history-dot.max_iterations_reached { background: var(--warn); }
+  .history-dot.timeout { background: var(--neutral); }
+  .history-item-time { font-size: 0.7rem; color: var(--text-faint); }
+  .history-item-refine-tag {
+    font-size: 0.65rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.03em;
+    color: var(--accent); background: var(--accent-soft); padding: 1px 5px; border-radius: 4px;
+  }
+
+  .sidebar-toggle {
+    display: none; position: fixed; top: 14px; left: 14px; z-index: 20;
+    width: 34px; height: 34px; border-radius: 8px; border: 1px solid var(--border);
+    background: var(--surface); color: var(--text); cursor: pointer; align-items: center; justify-content: center;
+  }
+  .sidebar-toggle svg { width: 16px; height: 16px; }
+
+  @media (max-width: 860px) {
+    .sidebar-toggle { display: flex; }
+    .sidebar {
+      position: fixed; left: 0; top: 0; z-index: 19;
+      transform: translateX(-100%); transition: transform 0.2s ease;
+      box-shadow: var(--shadow);
+    }
+    .sidebar.open { transform: translateX(0); }
+    main { padding-top: 64px; }
+  }
+
+  main { max-width: 880px; margin: 0 auto; padding: 40px 20px 100px; flex: 1; min-width: 0; }
 
   header { margin-bottom: 28px; }
   .eyebrow {
@@ -332,6 +404,19 @@
 </style>
 </head>
 <body>
+<button class="sidebar-toggle" id="sidebar-toggle" aria-label="Toggle history">
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M3.75 6.75h16.5M3.75 12h16.5M3.75 17.25h16.5"/></svg>
+</button>
+<div class="app-layout">
+<aside class="sidebar" id="sidebar">
+  <div class="sidebar-header">
+    <button class="new-chat-btn" id="new-run-btn">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15"/></svg>
+      New run
+    </button>
+  </div>
+  <div class="history-list" id="history-list"></div>
+</aside>
 <main>
   <header>
     <div class="eyebrow"><span class="dot"></span>Local agent · Ollama + qwen2.5-coder</div>
@@ -419,8 +504,18 @@
       <h2>Trace log</h2>
       <div class="timeline" id="trace-list"></div>
     </div>
+
+    <div class="card" id="refine-card">
+      <h2>Want to tweak something?</h2>
+      <textarea id="refine-instruction" placeholder="e.g. Also handle None input - return False instead of crashing"></textarea>
+      <div class="actions">
+        <button class="primary" id="refine-btn">Refine</button>
+        <span class="hint">Applies a small follow-up change to this same session, reusing its existing code.</span>
+      </div>
+    </div>
   </div>
 </main>
+</div>
 
 <script>
 (function () {
@@ -440,6 +535,7 @@
     clock: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path stroke-linecap="round" stroke-linejoin="round" d="M12 7v5l3 3"/></svg>',
     zap: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M13 2L3 14h7l-1 8 10-12h-7l1-8z"/></svg>',
     list: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></svg>',
+    trash: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M3 6h18M8 6V4a2 2 0 012-2h4a2 2 0 012 2v2m3 0v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6h14zM10 11v6M14 11v6"/></svg>',
   };
 
   Array.from(document.querySelectorAll("[data-icon]")).forEach(function (el) {
@@ -451,6 +547,7 @@
     error: { icon: "x", title: "Error", desc: "The agent hit an unrecoverable error." },
     max_iterations_reached: { icon: "alertTriangle", title: "Max iterations reached", desc: "Ran out of iterations before the tests passed." },
     timeout: { icon: "clock", title: "Timeout", desc: "The request exceeded the server's time budget." },
+    session_not_found: { icon: "alertTriangle", title: "Session not found", desc: "This session's workspace no longer exists." },
   };
 
   const TOOL_META = {
@@ -471,6 +568,15 @@
   const resultsEl = document.getElementById("results");
   const emptyState = document.getElementById("empty-state");
   const stepperEl = document.getElementById("stepper");
+  const refineInstructionEl = document.getElementById("refine-instruction");
+  const refineBtn = document.getElementById("refine-btn");
+  const historyListEl = document.getElementById("history-list");
+  const sidebarEl = document.getElementById("sidebar");
+  const sidebarToggleBtn = document.getElementById("sidebar-toggle");
+  const newRunBtn = document.getElementById("new-run-btn");
+
+  let currentSessionId = null;
+  let activeLogId = null;
 
   document.querySelectorAll(".example-chip").forEach(function (chip) {
     chip.addEventListener("click", function () {
@@ -712,8 +818,129 @@
   }
 
   // ---------------------------------------------------------------------
-  // Submit flow
+  // Submit / refine flow
   // ---------------------------------------------------------------------
+  function renderResults(data) {
+    currentSessionId = data.session_id;
+    document.getElementById("meta-session").textContent = data.session_id;
+    document.getElementById("meta-iterations").textContent = data.iterations;
+    renderStatusHero(data.status);
+    renderTestResult(data.test_result);
+    renderFiles(data.session_id, data.files);
+    renderTrace(data.trace_log);
+    wireCopyButtons(document.getElementById("test-result-card"));
+    resultsEl.classList.add("active");
+  }
+
+  function showError(message) {
+    errorBanner.innerHTML = ICONS.alertTriangle + "<span>" + escapeHtml(message) + "</span>";
+    errorBanner.classList.add("active");
+  }
+
+  // ---------------------------------------------------------------------
+  // History sidebar
+  // ---------------------------------------------------------------------
+  function formatHistoryTime(ts) {
+    if (!ts) return "";
+    const d = new Date(ts);
+    if (isNaN(d.getTime())) return "";
+    const sameDay = d.toDateString() === new Date().toDateString();
+    return sameDay
+      ? d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+      : d.toLocaleDateString([], { month: "short", day: "numeric" });
+  }
+
+  function renderHistoryList(entries) {
+    historyListEl.innerHTML = "";
+    if (!entries || entries.length === 0) {
+      historyListEl.innerHTML = '<div class="history-empty">No runs yet.</div>';
+      return;
+    }
+    entries.forEach(function (entry) {
+      const item = document.createElement("div");
+      item.className = "history-item" + (entry.log_id === activeLogId ? " active" : "");
+      const dotCls = STATUS_META[entry.status] ? entry.status : "error";
+      item.innerHTML =
+        '<button class="history-delete-btn" title="Delete" aria-label="Delete this run">' + ICONS.trash + "</button>" +
+        '<div class="history-item-req">' + escapeHtml(entry.requirement || "(no requirement)") + "</div>" +
+        '<div class="history-item-meta">' +
+        '<span class="history-dot ' + dotCls + '"></span>' +
+        '<span class="history-item-time">' + escapeHtml(formatHistoryTime(entry.timestamp)) + "</span>" +
+        (entry.is_refine ? '<span class="history-item-refine-tag">refine</span>' : "") +
+        "</div>";
+      item.addEventListener("click", function () { loadHistoryEntry(entry.log_id); });
+      item.querySelector(".history-delete-btn").addEventListener("click", function (e) {
+        e.stopPropagation();
+        deleteHistoryEntry(entry.log_id);
+      });
+      historyListEl.appendChild(item);
+    });
+  }
+
+  async function loadHistory() {
+    try {
+      const response = await fetch("/history");
+      if (!response.ok) return;
+      renderHistoryList(await response.json());
+    } catch (err) {
+      // Best-effort only - the sidebar failing to load shouldn't block the rest of the app.
+    }
+  }
+
+  async function loadHistoryEntry(logId) {
+    errorBanner.classList.remove("active");
+    try {
+      const response = await fetch("/history/" + encodeURIComponent(logId));
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || "Request failed with status " + response.status);
+
+      activeLogId = logId;
+      emptyState.classList.remove("active");
+      renderResults(data);
+      refineInstructionEl.value = "";
+      loadHistory();
+      sidebarEl.classList.remove("open");
+    } catch (err) {
+      showError(err.message);
+    }
+  }
+
+  async function deleteHistoryEntry(logId) {
+    if (!window.confirm("Delete this run from history? This can't be undone.")) return;
+    try {
+      const response = await fetch("/history/" + encodeURIComponent(logId), { method: "DELETE" });
+      if (!response.ok) {
+        const data = await response.json().catch(function () { return {}; });
+        throw new Error(data.detail || "Request failed with status " + response.status);
+      }
+      if (logId === activeLogId) {
+        activeLogId = null;
+        resultsEl.classList.remove("active");
+        emptyState.classList.add("active");
+      }
+      loadHistory();
+    } catch (err) {
+      showError(err.message);
+    }
+  }
+
+  newRunBtn.addEventListener("click", function () {
+    activeLogId = null;
+    currentSessionId = null;
+    requirementEl.value = "";
+    refineInstructionEl.value = "";
+    resultsEl.classList.remove("active");
+    errorBanner.classList.remove("active");
+    emptyState.classList.add("active");
+    sidebarEl.classList.remove("open");
+    loadHistory();
+    requirementEl.focus();
+  });
+
+  sidebarToggleBtn.addEventListener("click", function () {
+    sidebarEl.classList.toggle("open");
+  });
+
   async function submit() {
     const requirement = requirementEl.value.trim();
     if (!requirement) { requirementEl.focus(); return; }
@@ -734,18 +961,12 @@
       const data = await response.json();
       if (!response.ok) throw new Error(data.detail || "Request failed with status " + response.status);
 
-      document.getElementById("meta-session").textContent = data.session_id;
-      document.getElementById("meta-iterations").textContent = data.iterations;
-      renderStatusHero(data.status);
-      renderTestResult(data.test_result);
-      renderFiles(data.session_id, data.files);
-      renderTrace(data.trace_log);
-      wireCopyButtons(document.getElementById("test-result-card"));
-
-      resultsEl.classList.add("active");
+      activeLogId = data.session_id;
+      renderResults(data);
+      refineInstructionEl.value = "";
+      loadHistory();
     } catch (err) {
-      errorBanner.innerHTML = ICONS.alertTriangle + "<span>" + escapeHtml(err.message) + "</span>";
-      errorBanner.classList.add("active");
+      showError(err.message);
       emptyState.classList.add("active");
     } finally {
       stopProgress();
@@ -753,12 +974,48 @@
     }
   }
 
+  async function submitRefine() {
+    const instruction = refineInstructionEl.value.trim();
+    if (!instruction) { refineInstructionEl.focus(); return; }
+    if (!currentSessionId) { showError("No active session to refine yet."); return; }
+
+    refineBtn.disabled = true;
+    errorBanner.classList.remove("active");
+    startProgress();
+
+    try {
+      const response = await fetch("/generate-code/" + encodeURIComponent(currentSessionId) + "/refine", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ instruction: instruction }),
+      });
+
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || "Request failed with status " + response.status);
+
+      activeLogId = null;
+      renderResults(data);
+      refineInstructionEl.value = "";
+      loadHistory();
+    } catch (err) {
+      showError(err.message);
+    } finally {
+      stopProgress();
+      refineBtn.disabled = false;
+    }
+  }
+
   submitBtn.addEventListener("click", submit);
   requirementEl.addEventListener("keydown", function (e) {
     if ((e.metaKey || e.ctrlKey) && e.key === "Enter") submit();
   });
+  refineBtn.addEventListener("click", submitRefine);
+  refineInstructionEl.addEventListener("keydown", function (e) {
+    if ((e.metaKey || e.ctrlKey) && e.key === "Enter") submitRefine();
+  });
 
   emptyState.classList.add("active");
+  loadHistory();
 })();
 </script>
 </body>

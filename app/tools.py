@@ -5,15 +5,22 @@ result (never raises) so a single tool failure can't crash the agent loop.
 """
 from __future__ import annotations
 
+import os
 import subprocess
+import uuid
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
 from app.config import (
     RAG_API_URL,
     RAG_REQUEST_TIMEOUT,
+    SANDBOX_CPU_LIMIT,
+    SANDBOX_ENABLED,
+    SANDBOX_IMAGE,
+    SANDBOX_MEMORY_LIMIT,
+    SANDBOX_PIDS_LIMIT,
     TAVILY_API_KEY,
     TEST_RUN_TIMEOUT,
     WEB_SEARCH_TIMEOUT,
@@ -170,38 +177,98 @@ def write_code(filepath: str, content: str, session_id: str) -> Dict[str, Any]:
         return {"success": False, "path": filepath, "error": f"Unexpected error: {exc}"}
 
 
-def run_tests(session_id: str, command: str = "pytest") -> Dict[str, Any]:
-    """Run `command` inside workspace/{session_id} with a timeout.
-
-    Returns a dict with keys: exit_code (int), stdout (str), stderr (str).
-    A timeout or missing-workspace/tool condition is reported via a non-zero
-    exit_code and an explanatory stderr message rather than raising.
+def _build_sandboxed_argv(command: str, directory: Path, container_name: str, inner_timeout: int) -> List[str]:
+    """Build the `docker run` argv that executes `command` inside an isolated,
+    resource-limited, network-disabled container with `directory` mounted
+    as the working directory. The command is wrapped in the container's own
+    `timeout` utility so a runaway process is killed and the container exits
+    (and self-removes via --rm) cleanly, instead of leaving an orphaned
+    container behind if the outer Python-level timeout has to step in.
     """
-    session_path = _session_dir(session_id)
+    return [
+        "docker", "run", "--rm",
+        "--name", container_name,
+        "--network", "none",
+        "--memory", SANDBOX_MEMORY_LIMIT,
+        "--cpus", SANDBOX_CPU_LIMIT,
+        "--pids-limit", SANDBOX_PIDS_LIMIT,
+        "--read-only",
+        "--tmpfs", "/tmp",
+        "--user", f"{os.getuid()}:{os.getgid()}",
+        "-v", f"{directory.resolve()}:/workspace",
+        "-w", "/workspace",
+        SANDBOX_IMAGE,
+        "timeout", "--signal=KILL", f"{inner_timeout}s",
+        "sh", "-c", command,
+    ]
+
+
+def _force_remove_container(container_name: str) -> None:
+    """Best-effort cleanup for a container that may be orphaned if the outer
+    subprocess timeout fired before the inner `timeout` utility could exit
+    the container on its own. Never raises.
+    """
+    try:
+        subprocess.run(["docker", "rm", "-f", container_name], capture_output=True, timeout=15)
+    except Exception:  # noqa: BLE001 - cleanup must never itself crash the caller
+        pass
+
+
+def run_command_in_directory(directory: Path, command: str, timeout: int) -> Dict[str, Any]:
+    """Run `command` inside `directory` with a timeout, sandboxed the same
+    way as `run_tests` (Docker: no network, memory/CPU/process-count limits,
+    read-only root filesystem, non-root user) when SANDBOX_ENABLED - shared
+    by `run_tests` (against a session workspace) and the phase-1
+    test-validation pre-check (against a throwaway temp directory holding a
+    not-yet-frozen test file plus a generated stub implementation), since
+    both execute untrusted, model-influenced Python and are otherwise a
+    straightforward command-injection / arbitrary-code-execution surface.
+
+    Returns a dict with keys: exit_code (int), stdout (str), stderr (str),
+    timed_out (bool). A timeout or missing-directory/tool condition is
+    reported via a non-zero exit_code and an explanatory stderr message
+    rather than raising.
+    """
+    container_name = f"agentic-sandbox-{uuid.uuid4().hex[:12]}"
 
     try:
-        if not session_path.exists():
+        if not directory.exists():
             return {
                 "exit_code": -1,
                 "stdout": "",
-                "stderr": f"Session workspace does not exist: {session_path}",
+                "stderr": f"Directory does not exist: {directory}",
+                "timed_out": False,
             }
 
+        if SANDBOX_ENABLED:
+            argv: Any = _build_sandboxed_argv(command, directory, container_name, timeout)
+            run_kwargs: Dict[str, Any] = {}
+            # A little slack over `timeout` for container start/stop
+            # overhead; the inner `timeout` utility is what actually bounds
+            # the command itself.
+            outer_timeout = timeout + 15
+        else:
+            argv = command
+            run_kwargs = {"shell": True, "cwd": str(directory)}
+            outer_timeout = timeout
+
         result = subprocess.run(
-            command,
-            shell=True,
-            cwd=str(session_path),
+            argv,
             capture_output=True,
             text=True,
-            timeout=TEST_RUN_TIMEOUT,
+            timeout=outer_timeout,
+            **run_kwargs,
         )
         return {
             "exit_code": result.returncode,
             "stdout": result.stdout,
             "stderr": result.stderr,
+            "timed_out": False,
         }
 
     except subprocess.TimeoutExpired as exc:
+        if SANDBOX_ENABLED:
+            _force_remove_container(container_name)
         stdout = exc.stdout or ""
         stderr = exc.stderr or ""
         if isinstance(stdout, bytes):
@@ -211,11 +278,39 @@ def run_tests(session_id: str, command: str = "pytest") -> Dict[str, Any]:
         return {
             "exit_code": -1,
             "stdout": stdout,
-            "stderr": (stderr + f"\nError: test run timed out after {TEST_RUN_TIMEOUT}s.").strip(),
+            "stderr": (stderr + f"\nError: command timed out after {timeout}s.").strip(),
+            "timed_out": True,
         }
     except FileNotFoundError as exc:
-        return {"exit_code": -1, "stdout": "", "stderr": f"Error: command not found: {exc}"}
+        return {"exit_code": -1, "stdout": "", "stderr": f"Error: command not found: {exc}", "timed_out": False}
     except OSError as exc:
-        return {"exit_code": -1, "stdout": "", "stderr": f"Error: failed to run command: {exc}"}
+        return {"exit_code": -1, "stdout": "", "stderr": f"Error: failed to run command: {exc}", "timed_out": False}
     except Exception as exc:  # noqa: BLE001
-        return {"exit_code": -1, "stdout": "", "stderr": f"Unexpected error running tests: {exc}"}
+        return {"exit_code": -1, "stdout": "", "stderr": f"Unexpected error running command: {exc}", "timed_out": False}
+
+
+def run_tests(session_id: str, command: str = "pytest") -> Dict[str, Any]:
+    """Run `command` inside workspace/{session_id} with a timeout.
+
+    By default (SANDBOX_ENABLED) this runs inside an isolated Docker
+    container: no network, memory/CPU/process-count limits, read-only root
+    filesystem, non-root user - since `command` is model-controlled and this
+    is otherwise a straightforward command-injection surface. Set
+    SANDBOX_ENABLED=false to run directly on the host instead (e.g. if
+    Docker isn't available).
+
+    Returns a dict with keys: exit_code (int), stdout (str), stderr (str).
+    A timeout or missing-workspace/tool condition is reported via a non-zero
+    exit_code and an explanatory stderr message rather than raising.
+    """
+    session_path = _session_dir(session_id)
+    if not session_path.exists():
+        return {
+            "exit_code": -1,
+            "stdout": "",
+            "stderr": f"Session workspace does not exist: {session_path}",
+        }
+
+    result = run_command_in_directory(session_path, command, TEST_RUN_TIMEOUT)
+    result.pop("timed_out", None)  # not part of run_tests' pre-existing return contract
+    return result

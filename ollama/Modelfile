@@ -1,0 +1,8 @@
+FROM qwen2.5-coder:14b
+# Ollama's OpenAI-compatible endpoint (/v1/chat/completions), which this app
+# talks to, silently ignores a per-request "num_ctx" option (confirmed on
+# Ollama 0.32.0: neither top-level nor nested under "options" changes the
+# loaded context - checked via `ollama ps` before/after). Only requests to
+# the native /api/chat endpoint honor it. Baking num_ctx into the model
+# itself is the only way that reliably reaches the compat endpoint too.
+PARAMETER num_ctx 16384

@@ -21,21 +21,32 @@ OpenAI-style `tool_calls` field (observed with `qwen2.5-coder:14b` via
 Ollama, which sometimes emits the tool call as plain-text JSON instead) by
 recovering the call from the message content.
 
+`run_tests`' `command` comes straight from the LLM's tool call and is
+otherwise a direct shell-injection surface, so by default it runs inside an
+isolated Docker sandbox (no network, memory/CPU/process limits, read-only
+filesystem outside the mounted workspace) - see [Sandbox setup](#sandbox-setup-required-for-run_tests)
+below.
+
 ## Project layout
 
 ```
 agentic-coding-service/
 ├── app/
-│   ├── main.py              # FastAPI app: POST /generate-code, web UI, file viewer
+│   ├── main.py              # FastAPI app: /generate-code, /refine, web UI, file viewer
 │   ├── agent_loop.py         # loop logic that calls the LLM + tools until done
 │   ├── tools.py              # rag_search, web_search, write_code, run_tests
 │   ├── mock_rag_server.py    # separate mock RAG server (FastAPI, different port)
 │   ├── config.py             # env-based configuration
 │   └── static/
 │       └── index.html        # single-page UI served at http://localhost:8080/
+├── docker/
+│   └── sandbox.Dockerfile     # image run_tests executes commands inside
+├── ollama/
+│   └── Modelfile              # derives the model tag MODEL_NAME points to (bakes in num_ctx)
 ├── workspace/                 # per-session scratch dirs the agent writes code into
 ├── tests/
 │   ├── test_agent_loop.py
+│   ├── test_main.py
 │   └── test_tools.py
 ├── requirements.txt
 ├── .env.example
@@ -54,11 +65,38 @@ cp .env.example .env
 
 Edit `.env` if you need to change ports, the model name, or timeouts.
 
-You'll also need Ollama installed locally with the coding model pulled:
+You'll also need Ollama installed locally with the coding model pulled, plus
+a derived model tag with a larger context window created from it (Ollama's
+own default, 4096 tokens, is too small for a multi-iteration agent loop -
+and its OpenAI-compatible endpoint, which this app uses, silently ignores a
+per-request `num_ctx` override, so it has to be baked into the model tag
+itself via `ollama/Modelfile`):
 
 ```bash
 ollama pull qwen2.5-coder:14b
+ollama create qwen2.5-coder-16k -f ollama/Modelfile
 ```
+
+`MODEL_NAME` in `.env.example` already points at `qwen2.5-coder-16k`. If you
+change `ollama/Modelfile`'s `num_ctx` value, re-run the `ollama create`
+command above to apply it (uses ~11GB VRAM at 16384 tokens for the 14B
+Q4_K_M model - lower it in `ollama/Modelfile` if that doesn't fit).
+
+### Sandbox setup (required for `run_tests`)
+
+Build the sandbox image once (needs Docker installed and running):
+
+```bash
+docker build -f docker/sandbox.Dockerfile -t agentic-sandbox:latest .
+```
+
+With `SANDBOX_ENABLED=true` (the default), `run_tests` runs the LLM's test
+command inside a throwaway container built from this image - no network
+access, memory/CPU/process-count limits, read-only root filesystem except
+the mounted session workspace. Set `SANDBOX_ENABLED=false` in `.env` only if
+Docker isn't available (commands then run directly on the host shell -
+understand that this is a real command-injection risk before doing that,
+since `command` is whatever the LLM decides to send).
 
 `web_search` uses [Tavily](https://tavily.com) if `TAVILY_API_KEY` is set in
 `.env` (results tailored for LLM agents; get a free-tier key at
@@ -135,13 +173,32 @@ Each request gets its own `session_id` (a UUID), and its files are written to
 `workspace/<session_id>/`, so concurrent requests never collide.
 
 `status` will be one of: `success`, `max_iterations_reached`, `error`, or
-`timeout` (if the whole request exceeds `ENDPOINT_TIMEOUT`, default 300s / 5
+`timeout` (if the whole request exceeds `ENDPOINT_TIMEOUT`, default 480s / 8
 minutes).
+
+### Refining an existing session
+
+Once a session has files in its workspace, apply a small follow-up fix
+without starting over:
+
+```bash
+curl -X POST http://localhost:8080/generate-code/<session_id>/refine \
+  -H "Content-Type: application/json" \
+  -d '{"instruction": "Also handle None input by returning False instead of crashing."}'
+```
+
+This reuses the same workspace (existing files stay as context, existing
+`test_*.py` files stay frozen) and returns the same response shape. `404` if
+the session's workspace no longer exists; `400` if `session_id` isn't a
+valid UUID.
 
 ## 4. Run the tests
 
 The test suite mocks the LLM responses directly, so it does **not** require
-Ollama or the RAG server to be running:
+Ollama or the RAG server to be running. A handful of sandbox tests do
+exercise the real Docker image (network isolation, read-only filesystem) -
+those auto-skip if Docker or the `agentic-sandbox:latest` image aren't
+available, rather than failing the suite:
 
 ```bash
 pytest
