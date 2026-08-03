@@ -40,6 +40,72 @@ def _fake_tavily_module(search_return: Any = None, search_side_effect: Any = Non
     return fake_client_class
 
 
+class TestRagSearch:
+    """rag_search calls Server A's POST /search endpoint with the shared
+    X-API-Key header - mocked here so this suite never needs a running
+    Server A.
+    """
+
+    def test_sends_api_key_header_and_formats_results(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(tools, "SERVER_A_BASE_URL", "http://server-a.example:8000")
+        monkeypatch.setattr(tools, "SERVER_A_API_KEY", "secret-key")
+
+        captured: Dict[str, Any] = {}
+
+        class FakeResponse:
+            def raise_for_status(self) -> None:
+                pass
+
+            def json(self) -> Dict[str, Any]:
+                return {"results": [{"source": "docs/x.md", "content": "some context", "score": 0.9}]}
+
+        def fake_post(url: str, json: Dict[str, Any], headers: Dict[str, str], timeout: int) -> FakeResponse:
+            captured["url"], captured["json"], captured["headers"], captured["timeout"] = url, json, headers, timeout
+            return FakeResponse()
+
+        monkeypatch.setattr(tools.requests, "post", fake_post)
+
+        result = tools.rag_search("how to write a test", top_k=3)
+
+        assert captured["url"] == "http://server-a.example:8000/search"
+        assert captured["headers"] == {"X-API-Key": "secret-key"}
+        assert captured["json"] == {"query": "how to write a test", "top_k": 3}
+        assert "[docs/x.md]: some context" in result
+
+    def test_returns_message_on_empty_results(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        class FakeResponse:
+            def raise_for_status(self) -> None:
+                pass
+
+            def json(self) -> Dict[str, Any]:
+                return {"results": []}
+
+        monkeypatch.setattr(tools.requests, "post", lambda *a, **k: FakeResponse())
+
+        assert tools.rag_search("nothing relevant") == "No relevant context found."
+
+    def test_connection_error_returns_error_string_mentioning_server_a(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(tools, "SERVER_A_BASE_URL", "http://unreachable-host:8000")
+
+        def fake_post(*args: Any, **kwargs: Any) -> None:
+            raise tools.requests.exceptions.ConnectionError("refused")
+
+        monkeypatch.setattr(tools.requests, "post", fake_post)
+
+        result = tools.rag_search("anything")
+        assert "could not connect" in result.lower()
+        assert "unreachable-host:8000" in result
+
+    def test_timeout_returns_error_string(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def fake_post(*args: Any, **kwargs: Any) -> None:
+            raise tools.requests.exceptions.Timeout("too slow")
+
+        monkeypatch.setattr(tools.requests, "post", fake_post)
+
+        result = tools.rag_search("anything")
+        assert "timed out" in result.lower()
+
+
 class TestDuckDuckGoFallback:
     """When TAVILY_API_KEY is unset, web_search must go straight to DuckDuckGo."""
 

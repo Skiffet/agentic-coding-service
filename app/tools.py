@@ -14,13 +14,14 @@ from typing import Any, Dict, List, Optional, Tuple
 import requests
 
 from app.config import (
-    RAG_API_URL,
-    RAG_REQUEST_TIMEOUT,
     SANDBOX_CPU_LIMIT,
     SANDBOX_ENABLED,
     SANDBOX_IMAGE,
     SANDBOX_MEMORY_LIMIT,
     SANDBOX_PIDS_LIMIT,
+    SERVER_A_API_KEY,
+    SERVER_A_BASE_URL,
+    SERVER_A_REQUEST_TIMEOUT,
     TAVILY_API_KEY,
     TEST_RUN_TIMEOUT,
     WEB_SEARCH_TIMEOUT,
@@ -33,7 +34,8 @@ def _session_dir(session_id: str) -> Path:
 
 
 def rag_search(query: str, top_k: int = 5) -> str:
-    """Query the mock RAG API for context relevant to `query`.
+    """Query Server A's RAG endpoint (POST /search) for context relevant to
+    `query`.
 
     Returns a single human-readable string combining each result's content
     with its source, suitable for feeding straight back into the LLM. Never
@@ -41,9 +43,10 @@ def rag_search(query: str, top_k: int = 5) -> str:
     """
     try:
         response = requests.post(
-            f"{RAG_API_URL}/search",
+            f"{SERVER_A_BASE_URL}/search",
             json={"query": query, "top_k": top_k},
-            timeout=RAG_REQUEST_TIMEOUT,
+            headers={"X-API-Key": SERVER_A_API_KEY},
+            timeout=SERVER_A_REQUEST_TIMEOUT,
         )
         response.raise_for_status()
         payload = response.json()
@@ -60,9 +63,9 @@ def rag_search(query: str, top_k: int = 5) -> str:
         return "\n".join(lines)
 
     except requests.exceptions.Timeout:
-        return f"Error: RAG search timed out after {RAG_REQUEST_TIMEOUT}s."
+        return f"Error: RAG search timed out after {SERVER_A_REQUEST_TIMEOUT}s."
     except requests.exceptions.ConnectionError:
-        return f"Error: could not connect to RAG API at {RAG_API_URL}."
+        return f"Error: could not connect to Server A's RAG endpoint at {SERVER_A_BASE_URL}."
     except requests.exceptions.RequestException as exc:
         return f"Error: RAG search request failed: {exc}"
     except (ValueError, KeyError, TypeError) as exc:

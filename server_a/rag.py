@@ -1,18 +1,13 @@
-"""Standalone mock RAG (retrieval-augmented generation) server.
-
-Runs as its own FastAPI process on a different port than the main app,
-so it can simulate an external knowledge-base/search API. Run with:
-
-    uvicorn app.mock_rag_server:app --port 8000 --reload
+"""RAG (retrieval-augmented generation) search - the corpus + scoring logic
+that used to live in the standalone app/mock_rag_server.py mock, now part of
+Server A itself (Server A owns RAG, per the target architecture). Exposed
+both as a plain function (used in-process by /generate-requirement - no HTTP
+round-trip to itself) and over HTTP via POST /search (for Server B's
+rag_search tool calls during the implementation phase).
 """
 from __future__ import annotations
 
-from typing import List
-
-from fastapi import FastAPI
-from pydantic import BaseModel, Field
-
-app = FastAPI(title="Mock RAG Server")
+from typing import Any, Dict, List
 
 # A small, fixed corpus of realistic-looking snippets covering general
 # Python topics. In a real system this would be a vector DB lookup.
@@ -65,34 +60,12 @@ _CORPUS = [
 ]
 
 
-class SearchRequest(BaseModel):
-    query: str
-    top_k: int = Field(default=5, ge=1, le=20)
-
-
-class SearchResult(BaseModel):
-    source: str
-    content: str
-    score: float
-
-
-class SearchResponse(BaseModel):
-    results: List[SearchResult]
-
-
-@app.get("/health")
-def health() -> dict:
-    return {"status": "ok"}
-
-
-@app.post("/search", response_model=SearchResponse)
-def search(request: SearchRequest) -> SearchResponse:
-    """Return the top_k most "relevant" entries.
-
-    This mock ranks by a naive keyword-overlap score against the query so
-    that results feel query-dependent, without needing a real embedding model.
+def search(query: str, top_k: int = 5) -> List[Dict[str, Any]]:
+    """Return the top_k most "relevant" corpus entries for `query`, ranked by
+    naive keyword-overlap so results feel query-dependent without a real
+    embedding model. Each result: {"source": str, "content": str, "score": float}.
     """
-    query_terms = set(request.query.lower().split())
+    query_terms = set(query.lower().split())
 
     scored = []
     for entry in _CORPUS:
@@ -101,14 +74,7 @@ def search(request: SearchRequest) -> SearchResponse:
         # Baseline score so results are never zero/empty-looking, plus a bonus
         # per overlapping term, capped at 0.99.
         score = min(0.55 + 0.12 * overlap, 0.99)
-        scored.append(SearchResult(source=entry["source"], content=entry["content"], score=score))
+        scored.append({"source": entry["source"], "content": entry["content"], "score": score})
 
-    scored.sort(key=lambda r: r.score, reverse=True)
-    top_k = min(request.top_k, len(scored))
-    return SearchResponse(results=scored[:top_k])
-
-
-if __name__ == "__main__":
-    import uvicorn
-
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    scored.sort(key=lambda r: r["score"], reverse=True)
+    return scored[: min(top_k, len(scored))]

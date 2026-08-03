@@ -714,7 +714,8 @@
         if (!loaded && isOpen) {
           loaded = true;
           const pre = document.getElementById(codeBlockId);
-          fetch("/sessions/" + encodeURIComponent(sessionId) + "/files/" + path)
+          const encodedPath = path.split("/").map(encodeURIComponent).join("/");
+          fetch("/sessions/" + encodeURIComponent(sessionId) + "/files/" + encodedPath)
             .then(function (r) { return r.json(); })
             .then(function (data) {
               const content = data.content !== undefined ? data.content : (data.detail || "Could not load file.");

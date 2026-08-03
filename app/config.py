@@ -1,5 +1,6 @@
 """Centralized configuration, read from environment variables (.env)."""
 import os
+from urllib.parse import urlparse
 
 from dotenv import load_dotenv
 
@@ -25,7 +26,27 @@ def _env_bool(name: str, default: bool) -> bool:
 
 OLLAMA_BASE_URL: str = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1")
 MODEL_NAME: str = os.getenv("MODEL_NAME", "qwen2.5-coder:14b")
-RAG_API_URL: str = os.getenv("RAG_API_URL", "http://localhost:8000")
+
+# Server A: the machine running the big reasoning model (Qwen3) + RAG + eval
+# formatting. This machine (Server B) is always the client - Server A never
+# calls back. Defaults to localhost so a single-machine dev/test setup keeps
+# working before real Server A hardware exists; point SERVER_A_BASE_URL at
+# its real address once it's up.
+SERVER_A_BASE_URL: str = os.getenv("SERVER_A_BASE_URL", "http://localhost:8000")
+# Shared secret sent as the X-API-Key header on every call to Server A - must
+# match the SERVER_A_API_KEY configured on Server A itself.
+SERVER_A_API_KEY: str = os.getenv("SERVER_A_API_KEY", "")
+SERVER_A_REQUEST_TIMEOUT: int = _env_int("SERVER_A_REQUEST_TIMEOUT", 30)
+
+_server_a_host = urlparse(SERVER_A_BASE_URL).hostname
+if _server_a_host not in ("localhost", "127.0.0.1") and not SERVER_A_API_KEY:
+    raise RuntimeError(
+        f"SERVER_A_BASE_URL points at a non-local host ({SERVER_A_BASE_URL!r}) "
+        "but SERVER_A_API_KEY is empty. Set SERVER_A_API_KEY (it must match "
+        "the same value configured on Server A) before pointing at a real "
+        "remote Server A - refusing to start rather than make unauthenticated "
+        "cross-machine calls."
+    )
 
 # Ollama's own default context window (4096 tokens) is much smaller than what
 # qwen2.5-coder:14b actually supports (32768) and than what a long agent loop
@@ -60,7 +81,6 @@ WORKSPACE_ROOT: str = os.getenv("WORKSPACE_ROOT", "workspace")
 LOGS_DIR: str = os.getenv("LOGS_DIR", "logs")
 
 # Timeouts (seconds)
-RAG_REQUEST_TIMEOUT: int = _env_int("RAG_REQUEST_TIMEOUT", 10)
 WEB_SEARCH_TIMEOUT: int = _env_int("WEB_SEARCH_TIMEOUT", 10)
 TEST_RUN_TIMEOUT: int = _env_int("TEST_RUN_TIMEOUT", 60)
 ENDPOINT_TIMEOUT: int = _env_int("ENDPOINT_TIMEOUT", 480)
