@@ -1,8 +1,7 @@
 """API-key auth dependency for Server A's endpoints. Every endpoint except
 /health requires a matching X-API-Key header - Server B calls these over the
 network, and this is otherwise a completely open surface (arbitrary
-requirement/eval generation using Server A's GPU, or a spoofed "passed" eval
-result fed back into Server B's loop).
+requirement/test generation using Server A's GPU and RAG data for free).
 """
 from __future__ import annotations
 

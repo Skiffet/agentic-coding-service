@@ -1,6 +1,5 @@
 """HTTP client for Server B calling out to Server A's /generate-requirement
-and /eval endpoints. Server A never calls back - Server B is always the
-client here.
+endpoint. Server A never calls back - Server B is always the client here.
 
 Same "never raises" contract as the rest of app/tools.py: any failure -
 connection error, timeout, non-2xx, unparsable JSON - is swallowed and
@@ -63,13 +62,3 @@ def generate_requirement(requirement: str) -> Optional[Dict[str, Any]]:
     treat None as "fall back to the local test-writer".
     """
     return _post_with_retry("/generate-requirement", {"requirement": requirement})
-
-
-def eval_test_result(test_result: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """Ask Server A to format a real pytest run's exit_code/stdout/stderr
-    into structured {"passed", "failed_tests", "error_type", "summary"}.
-    Returns None if Server A is unreachable/erroring - callers should keep
-    using the raw test_result only (pass/fail already comes from exit_code
-    either way; this is purely for readability).
-    """
-    return _post_with_retry("/eval", {"test_result": test_result})

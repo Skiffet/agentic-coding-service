@@ -1,6 +1,6 @@
 """Tests for app/server_a_client.py - the HTTP client Server B uses to call
-Server A's /generate-requirement and /eval. Mocks `requests.post` directly so
-this suite never needs a running Server A.
+Server A's /generate-requirement. Mocks `requests.post` directly so this
+suite never needs a running Server A.
 """
 from __future__ import annotations
 
@@ -99,18 +99,3 @@ def test_generate_requirement_returns_none_after_two_connection_errors(monkeypat
     assert calls["count"] == 2  # one retry, then give up
 
 
-def test_eval_test_result_posts_to_eval_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
-    captured: Dict[str, Any] = {}
-
-    def fake_post(url: str, json: Dict[str, Any], headers: Dict[str, str], timeout: int) -> FakeResponse:
-        captured["url"] = url
-        captured["json"] = json
-        return FakeResponse(json_body={"passed": True, "failed_tests": [], "error_type": None, "summary": "ok"})
-
-    monkeypatch.setattr(requests, "post", fake_post)
-
-    result = server_a_client.eval_test_result({"exit_code": 0, "stdout": "", "stderr": ""})
-
-    assert captured["url"].endswith("/eval")
-    assert captured["json"] == {"test_result": {"exit_code": 0, "stdout": "", "stderr": ""}}
-    assert result == {"passed": True, "failed_tests": [], "error_type": None, "summary": "ok"}

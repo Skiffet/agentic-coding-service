@@ -2,12 +2,17 @@
 suite never needs a running Ollama server or a running Server A.
 
 The autouse `_isolate_workspace` fixture forces `server_a_client.generate_requirement`
-and `.eval_test_result` to return None by default, i.e. "Server A unreachable" -
-so every test here exercises Server B's local fallback path (the same
-test-writer loop, now living in app/test_writer.py - see test_test_writer.py
-for its own unit tests) for phase 1, plus the implementation phase.
-Individual tests override these to exercise the "Server A reachable" paths
-specifically.
+to return None by default, i.e. "Server A unreachable" - so every test here
+exercises Server B's local fallback path (the same test-writer loop, now
+living in app/test_writer.py - see test_test_writer.py for its own unit
+tests) for phase 1, plus the implementation phase. Individual tests override
+this to exercise the "Server A reachable" path specifically.
+
+It also forces `_format_eval_locally` (eval-formatting, done locally on
+Server B - see app/agent_loop.py's module docstring for why) to return None
+by default, so most tests' scripted `responses` don't need an extra turn per
+`run_tests` call just for eval-formatting; individual tests override it to
+exercise the "formatting succeeded" path specifically.
 
 The loop runs two phases against the same fake client, in order:
 1. test generation (writes frozen test file(s) from the requirement alone)
@@ -47,9 +52,11 @@ def _isolate_workspace(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     # Sandbox behavior itself is covered separately in tests/test_tools.py.
     monkeypatch.setattr("app.tools.SANDBOX_ENABLED", False)
     # Default to "Server A unreachable" so every existing test exercises the
-    # local fallback path unless it explicitly overrides these.
+    # local fallback path unless it explicitly overrides this.
     monkeypatch.setattr(agent_loop.server_a_client, "generate_requirement", lambda requirement: None)
-    monkeypatch.setattr(agent_loop.server_a_client, "eval_test_result", lambda test_result: None)
+    # Default to "eval formatting unavailable" so existing tests' scripted
+    # responses don't need an extra turn per run_tests call for this.
+    monkeypatch.setattr(agent_loop, "_format_eval_locally", lambda client, test_result: None)
 
 
 def test_implementation_tools_include_search_and_run_tests() -> None:
@@ -466,11 +473,11 @@ def test_server_a_requirement_used_skips_local_test_writer(monkeypatch: pytest.M
     assert fake_client.chat.completions.calls == 2
 
 
-def test_server_a_eval_is_attached_to_run_tests_result(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_eval_formatting_is_attached_to_run_tests_result(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
-        agent_loop.server_a_client,
-        "eval_test_result",
-        lambda test_result: {"passed": True, "failed_tests": [], "error_type": None, "summary": "All good."},
+        agent_loop,
+        "_format_eval_locally",
+        lambda client, test_result: {"passed": True, "failed_tests": [], "error_type": None, "summary": "All good."},
     )
     responses = [
         FakeCompletion(
@@ -488,16 +495,16 @@ def test_server_a_eval_is_attached_to_run_tests_result(monkeypatch: pytest.Monke
     ]
     _install_fake_client(monkeypatch, responses)
 
-    result = agent_loop.run_agent_loop(requirement="Write add(a, b), with a passing test.", session_id="server-a-eval-session", max_iterations=5)
+    result = agent_loop.run_agent_loop(requirement="Write add(a, b), with a passing test.", session_id="eval-session", max_iterations=5)
 
     assert result["status"] == "success"
-    assert result["test_result"]["server_a_eval"]["summary"] == "All good."
+    assert result["test_result"]["eval"]["summary"] == "All good."
     run_tests_event = next(e for e in result["trace_log"] if e.get("tool") == "run_tests")
-    assert run_tests_event["output"]["server_a_eval"]["summary"] == "All good."
+    assert run_tests_event["output"]["eval"]["summary"] == "All good."
 
 
-def test_server_a_eval_unavailable_is_logged_but_does_not_block_success(monkeypatch: pytest.MonkeyPatch) -> None:
-    # The autouse fixture already forces eval_test_result to return None -
+def test_eval_formatting_unavailable_is_logged_but_does_not_block_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The autouse fixture already forces _format_eval_locally to return None -
     # just assert the event shows up and the run still succeeds normally,
     # driven purely by the real exit_code.
     responses = [
@@ -517,12 +524,12 @@ def test_server_a_eval_unavailable_is_logged_but_does_not_block_success(monkeypa
     _install_fake_client(monkeypatch, responses)
 
     result = agent_loop.run_agent_loop(
-        requirement="Write add(a, b), with a passing test.", session_id="server-a-eval-unavailable-session", max_iterations=5
+        requirement="Write add(a, b), with a passing test.", session_id="eval-unavailable-session", max_iterations=5
     )
 
     assert result["status"] == "success"
-    assert "server_a_eval" not in (result["test_result"] or {})
-    assert any(e.get("event") == "server_a_eval_unavailable" for e in result["trace_log"])
+    assert "eval" not in (result["test_result"] or {})
+    assert any(e.get("event") == "eval_formatting_unavailable" for e in result["trace_log"])
 
 
 class TestRefineAgentLoop:

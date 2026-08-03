@@ -1,5 +1,5 @@
-"""Server A: the machine running the big reasoning model (Qwen3) plus RAG and
-eval-formatting. Server B calls this over HTTP - Server A never calls back.
+"""Server A: the machine running the big reasoning model (Qwen3) plus RAG.
+Server B calls this over HTTP - Server A never calls back.
 
 Run with: uvicorn server_a.main:app --host 0.0.0.0 --port 8000
 
@@ -8,12 +8,16 @@ run_tests uses) - /generate-requirement validates each candidate test file
 against a real, sandboxed pytest run before accepting it (see
 app.test_writer.validate_test_file_before_freeze), independent of Qwen3 or
 RAG. This is in addition to the GPU for Qwen3.
+
+Eval-formatting (summarizing a real pytest run into structured JSON) lives on
+Server B instead, not here - it's called far more often than
+/generate-requirement (once per `run_tests`, vs. once per overall run) and
+doesn't need Qwen3-level reasoning, so it isn't worth paying Server A's
+CPU-only latency for repeatedly. See app/agent_loop.py's `_format_eval_locally`.
 """
 from __future__ import annotations
 
-import json
-import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 from fastapi import Depends, FastAPI
 from openai import OpenAI
@@ -30,10 +34,7 @@ from server_a.config import (
     SERVER_A_MODEL_NUM_CTX,
 )
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-app = FastAPI(title="Server A - Qwen3 + RAG + Eval")
+app = FastAPI(title="Server A - Qwen3 + RAG")
 
 
 def _make_client() -> OpenAI:
@@ -77,17 +78,6 @@ class GenerateRequirementResponse(BaseModel):
     trace: List[Dict[str, Any]]
 
 
-class EvalRequest(BaseModel):
-    test_result: Dict[str, Any]
-
-
-class EvalResponse(BaseModel):
-    passed: bool
-    failed_tests: List[str]
-    error_type: Optional[str] = None
-    summary: str
-
-
 @app.get("/health")
 def health() -> dict:
     return {"status": "ok"}
@@ -127,50 +117,6 @@ def generate_requirement(request: GenerateRequirementRequest) -> GenerateRequire
         web_search=web_search,
     )
     return GenerateRequirementResponse(requirement=request.requirement, test_files=frozen_contents, trace=trace)
-
-
-_EVAL_SYSTEM_PROMPT = """You are given the raw output of a real pytest run
-(exit_code, stdout, stderr). Summarize it into JSON with exactly these keys:
-"failed_tests" (list of test names that failed or errored, [] if none),
-"error_type" (the most relevant Python exception type name if any failure
-has one, else null), "summary" (one short sentence describing the result).
-Do not decide pass/fail yourself - only describe what the output shows.
-Respond with ONLY the JSON object, no other text."""
-
-
-@app.post("/eval", response_model=EvalResponse, dependencies=[Depends(verify_api_key)])
-def eval_test_result(request: EvalRequest) -> EvalResponse:
-    """Format a real pytest run into structured JSON. `passed` is always
-    computed deterministically from the real exit_code - Qwen3 only
-    describes what the output shows, it never gets to override pass/fail.
-    """
-    test_result = request.test_result
-    passed = test_result.get("exit_code") == 0
-
-    failed_tests: List[str] = []
-    error_type: Optional[str] = None
-    summary = "Tests passed." if passed else "Tests failed."
-
-    try:
-        client = _make_client()
-        completion = client.chat.completions.create(
-            model=SERVER_A_MODEL_NAME,
-            messages=[
-                {"role": "system", "content": _EVAL_SYSTEM_PROMPT},
-                {"role": "user", "content": json.dumps(test_result)},
-            ],
-            extra_body={"options": {"num_ctx": SERVER_A_MODEL_NUM_CTX}},
-        )
-        content = completion.choices[0].message.content if completion.choices else None
-        if content:
-            parsed = json.loads(content)
-            failed_tests = parsed.get("failed_tests") or []
-            error_type = parsed.get("error_type")
-            summary = parsed.get("summary") or summary
-    except Exception as exc:  # noqa: BLE001 - eval formatting must never break the endpoint
-        logger.warning("Eval formatting failed, returning deterministic result only: %s", exc)
-
-    return EvalResponse(passed=passed, failed_tests=failed_tests, error_type=error_type, summary=summary)
 
 
 if __name__ == "__main__":

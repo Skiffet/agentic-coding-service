@@ -7,8 +7,6 @@ subprocess against a generated stub - no network/Docker required.
 """
 from __future__ import annotations
 
-import json
-
 import pytest
 from fastapi.testclient import TestClient
 
@@ -95,52 +93,3 @@ def test_generate_requirement_returns_test_files(
     assert body["requirement"] == "Write add(a, b), with a passing test."
     assert "test_add.py" in body["test_files"]
     assert "assert add(1, 2) == 3" in body["test_files"]["test_add.py"]
-
-
-def test_eval_rejects_missing_api_key(client: TestClient) -> None:
-    response = client.post("/eval", json={"test_result": {"exit_code": 0, "stdout": "", "stderr": ""}})
-    assert response.status_code == 401
-
-
-def test_eval_passed_is_deterministic_from_exit_code_not_the_llm(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Even if the LLM's formatting call fails outright, `passed` must still
-    be correct - it's computed from the real exit_code before the LLM is
-    ever called, never overridden by it.
-    """
-
-    def _boom() -> None:
-        raise RuntimeError("LLM backend unreachable")
-
-    monkeypatch.setattr(server_a_main, "_make_client", _boom)
-
-    response = client.post(
-        "/eval",
-        json={"test_result": {"exit_code": 1, "stdout": "", "stderr": "AssertionError"}},
-        headers=_auth_headers(),
-    )
-
-    assert response.status_code == 200
-    body = response.json()
-    assert body["passed"] is False
-    assert body["summary"]  # falls back to a deterministic default summary
-
-
-def test_eval_uses_llm_formatting_when_available(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
-    formatted = {"failed_tests": ["test_add"], "error_type": "AssertionError", "summary": "1 test failed."}
-    fake_client = FakeClient([FakeCompletion(FakeMessage(content=json.dumps(formatted), tool_calls=None))])
-    monkeypatch.setattr(server_a_main, "_make_client", lambda: fake_client)
-
-    response = client.post(
-        "/eval",
-        json={"test_result": {"exit_code": 1, "stdout": "", "stderr": "AssertionError"}},
-        headers=_auth_headers(),
-    )
-
-    assert response.status_code == 200
-    body = response.json()
-    assert body["passed"] is False  # still from exit_code, not the LLM
-    assert body["failed_tests"] == ["test_add"]
-    assert body["error_type"] == "AssertionError"
-    assert body["summary"] == "1 test failed."

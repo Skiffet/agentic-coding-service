@@ -3,15 +3,16 @@
 A two-machine agentic coding system:
 
 - **Server A** (a separate, more powerful machine - not required to run this
-  today) runs the big reasoning model (Qwen3) plus RAG and eval-formatting:
-  given a raw requirement, it returns frozen pytest test file(s); given a
-  real pytest run's result, it formats it into structured JSON. Server A
-  never calls back - Server B is always the client. See `server_a/`.
+  today) runs the big reasoning model (Qwen3) plus RAG: given a raw
+  requirement, it returns frozen pytest test file(s). Server A never calls
+  back - Server B is always the client. See `server_a/`.
 - **Server B** (this machine, what you run day to day) runs Qwen2.5-Coder,
   the orchestrator loop, and the Docker sandbox. It takes a text requirement
   and has the LLM agent write code for it, automatically looping through
   four tools — `rag_search`, `web_search`, `write_code`, and `run_tests` —
-  until the tests pass or a max iteration count is reached.
+  until the tests pass or a max iteration count is reached. It also formats
+  each `run_tests` result into structured JSON locally (not on Server A -
+  see [Two-machine deployment](#two-machine-deployment) for why).
 
 Both machines run their model locally via [Ollama](https://ollama.com),
 accessed through its OpenAI-compatible API using the `openai` Python SDK.
@@ -25,9 +26,9 @@ The loop runs in two phases so the agent can't grade its own homework:
    from editing them.
 2. **Implementation** - the LLM iterates with `rag_search` / `web_search` /
    `write_code` / `run_tests` until the frozen tests pass or the iteration
-   budget runs out. After each `run_tests` call, Server A is asked to format
+   budget runs out. After each `run_tests` call, Server B's own model formats
    the real result into structured JSON (purely for readability - pass/fail
-   always comes from the real exit code, with or without Server A).
+   always comes from the real exit code either way).
 
 **You don't need Server A to use this today** - see
 [Two-machine deployment](#two-machine-deployment) below. Everything works
@@ -52,15 +53,15 @@ below.
 agentic-coding-service/
 ├── app/                       # Server B: Qwen2.5-Coder + orchestrator + sandbox
 │   ├── main.py                # FastAPI app: /generate-code, /refine, web UI, file viewer
-│   ├── agent_loop.py          # loop logic: calls Server A (or falls back locally), then implements
+│   ├── agent_loop.py          # loop logic: calls Server A (or falls back locally); also formats eval results locally
 │   ├── test_writer.py         # shared test-writing tool loop (used by Server B's fallback AND Server A)
-│   ├── server_a_client.py     # HTTP client for calling Server A's /generate-requirement + /eval
+│   ├── server_a_client.py     # HTTP client for calling Server A's /generate-requirement
 │   ├── tools.py               # rag_search (-> Server A), web_search, write_code, run_tests
 │   └── config.py              # env-based configuration
 │   └── static/
 │       └── index.html         # single-page UI served at http://localhost:8080/
-├── server_a/                  # Server A: Qwen3 + RAG + eval-formatting (deploy to its own machine)
-│   ├── main.py                # FastAPI app: /search, /generate-requirement, /eval
+├── server_a/                  # Server A: Qwen3 + RAG (deploy to its own machine)
+│   ├── main.py                # FastAPI app: /search, /generate-requirement
 │   ├── rag.py                 # RAG corpus + search (Server A owns RAG)
 │   ├── auth.py                # X-API-Key dependency, fails closed
 │   └── config.py              # env-based configuration
@@ -161,12 +162,12 @@ ollama serve
 uvicorn app.main:app --host 0.0.0.0 --port 8080 --reload
 ```
 
-Every `rag_search` call and every eval-formatting attempt will fail fast
-(nothing is listening on `SERVER_A_BASE_URL`, which defaults to
+Every `rag_search` call and the initial test-generation request will fail
+fast (nothing is listening on `SERVER_A_BASE_URL`, which defaults to
 `localhost:8000`) and Server B transparently falls back to its own local
-test-writer / skips eval formatting - see
-[Two-machine deployment](#two-machine-deployment) below for running Server A
-too.
+test-writer - see [Two-machine deployment](#two-machine-deployment) below for
+running Server A too. Eval-formatting always runs locally on Server B
+regardless (see why in the intro above), so it's unaffected either way.
 
 ### Two-machine deployment
 
@@ -192,15 +193,19 @@ there) and run it as a separate process:
    `SERVER_A_BASE_URL`, Server B **refuses to start** unless
    `SERVER_A_API_KEY` is also set - this is intentional, to avoid silently
    making unauthenticated cross-machine calls.
-4. Setting `OLLAMA_HOST=0.0.0.0` and opening the firewall on Server A so
-   Server B can actually reach it is a real infra step to do at that point -
-   not covered here, and not exercised by testing both processes on one
-   machine via `localhost`.
+4. Opening the firewall on Server A for **port 8000 only** (server_a/main.py)
+   so Server B can reach it is a real infra step to do at that point - not
+   exercised by testing both processes on one machine via `localhost`.
+   **Ollama itself does not need to be exposed** - it stays on its default
+   `localhost:11434` binding, since only `server_a/main.py` (running on the
+   same machine) ever talks to it; Server B never calls Ollama directly, only
+   `server_a/main.py`'s HTTP API.
 
 Every run's trace log records which path was actually taken, so you can
 confirm the wiring: look for `server_a_requirement_used` /
-`server_a_unreachable` + `local_fallback_used` (phase 1), and
-`server_a_eval` / `server_a_eval_unavailable` (after each `run_tests` call).
+`server_a_unreachable` + `local_fallback_used` (phase 1). Eval-formatting
+always happens locally on Server B (`eval_formatting_unavailable` only shows
+up if that local call itself fails, unrelated to Server A).
 
 ## 3. Try it out
 

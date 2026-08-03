@@ -11,9 +11,13 @@ The loop runs in two phases so the agent can't "grade its own homework":
    model - see _generate_frozen_tests.
 2. Implementation - the LLM (with rag_search / write_code / run_tests)
    iterates on the implementation until the frozen tests pass or
-   `max_iterations` is reached. After each `run_tests` call, Server A's
-   /eval is asked to format the real result into structured JSON (purely
-   for readability - pass/fail always comes from the real exit_code).
+   `max_iterations` is reached. After each `run_tests` call, this machine's
+   own model formats the real result into structured JSON (purely for
+   readability - pass/fail always comes from the real exit_code) - see
+   _format_eval_locally. This runs on Server B rather than Server A: it's
+   called far more often than test-generation (once per `run_tests`, vs.
+   once per overall run) and doesn't need Qwen3-level reasoning, so it isn't
+   worth paying Server A's (CPU-only) latency for repeatedly.
 """
 from __future__ import annotations
 
@@ -164,6 +168,48 @@ def _make_client() -> OpenAI:
     return OpenAI(base_url=OLLAMA_BASE_URL, api_key=OPENAI_API_KEY)
 
 
+_EVAL_SYSTEM_PROMPT = """You are given the raw output of a real pytest run
+(exit_code, stdout, stderr). Summarize it into JSON with exactly these keys:
+"failed_tests" (list of test names that failed or errored, [] if none),
+"error_type" (the most relevant Python exception type name if any failure
+has one, else null), "summary" (one short sentence describing the result).
+Do not decide pass/fail yourself - only describe what the output shows.
+Respond with ONLY the JSON object, no other text."""
+
+
+def _format_eval_locally(client: OpenAI, test_result: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Ask this machine's own model to format a real pytest result into
+    structured JSON - purely for readability. `passed` is always computed
+    deterministically from the real exit_code before the model is ever
+    called, never overridden by it. Returns None if the formatting call
+    itself fails for any reason - callers should just keep using the raw
+    test_result in that case, exactly like Server A being unreachable used
+    to behave.
+    """
+    passed = test_result.get("exit_code") == 0
+    try:
+        completion = client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=[
+                {"role": "system", "content": _EVAL_SYSTEM_PROMPT},
+                {"role": "user", "content": json.dumps(test_result)},
+            ],
+            extra_body={"options": {"num_ctx": OLLAMA_NUM_CTX}},
+        )
+        content = completion.choices[0].message.content if completion.choices else None
+        if not content:
+            return None
+        parsed = json.loads(content)
+        return {
+            "passed": passed,
+            "failed_tests": parsed.get("failed_tests") or [],
+            "error_type": parsed.get("error_type"),
+            "summary": parsed.get("summary") or ("Tests passed." if passed else "Tests failed."),
+        }
+    except Exception:  # noqa: BLE001 - eval formatting must never break the loop
+        return None
+
+
 def _resolve_session_path(session_id: str, filepath: str) -> Optional[Any]:
     """Resolve `filepath` against the session workspace. Returns None on failure."""
     try:
@@ -312,9 +358,10 @@ def _run_implementation_loop(
     `max_iterations` is reached. Used by both a fresh `run_agent_loop` run
     and `refine_agent_loop` continuing an existing session.
 
-    After each `run_tests` call, asks Server A's /eval to format the real
-    result into structured JSON (purely for readability - pass/fail always
-    comes from the real exit_code, never from Server A's eval).
+    After each `run_tests` call, asks this machine's own model
+    (`_format_eval_locally`) to format the real result into structured JSON
+    (purely for readability - pass/fail always comes from the real
+    exit_code, never from that formatting call).
 
     Returns {status, files, test_result, iterations, trace_log}.
     """
@@ -451,11 +498,11 @@ def _run_implementation_loop(
             result = _dispatch_tool_call(tool_name, arguments, session_id, written_files, frozen_paths)
 
             if tool_name == "run_tests" and isinstance(result, dict):
-                server_a_eval = server_a_client.eval_test_result(result)
-                if server_a_eval is not None:
-                    result = {**result, "server_a_eval": server_a_eval}
+                formatted_eval = _format_eval_locally(client, result)
+                if formatted_eval is not None:
+                    result = {**result, "eval": formatted_eval}
                 else:
-                    trace_log.append({"phase": phase, "iteration": iteration, "event": "server_a_eval_unavailable"})
+                    trace_log.append({"phase": phase, "iteration": iteration, "event": "eval_formatting_unavailable"})
                 test_result = result
 
             trace_log.append(
