@@ -675,6 +675,58 @@ class TestClassifyPytestFailures:
     def test_no_failures_returns_empty(self) -> None:
         assert test_writer._classify_pytest_failures("2 passed in 0.01s\n") == []
 
+    def test_ignores_stub_failures_from_real_pytest_output_with_truncated_summary(self) -> None:
+        # The exact real bug, reproduced with actual pytest output shape: the
+        # short summary line's exception type gets cut off by pytest itself
+        # ("NotImplementedE...", confirmed via a real sandboxed run) once the
+        # test-id prefix is long enough - the untruncated body above it
+        # ("E   NotImplementedError: ...") must be what's actually checked.
+        output = (
+            "____________________ test_add_positive_numbers _____________________\n"
+            "\n"
+            "    def test_add_positive_numbers():\n"
+            ">       assert add(1, 2) == 3\n"
+            "E       NotImplementedError: add is a pre-freeze validation stub\n"
+            "\n"
+            "solution.py:2: NotImplementedError\n"
+            "=========================== short test summary info ============================\n"
+            "FAILED test_validation_target.py::test_add_positive_numbers - NotImplementedE...\n"
+        )
+        assert test_writer._classify_pytest_failures(output) == []
+
+    def test_flags_genuine_errors_from_real_pytest_output_even_with_truncated_summary(self) -> None:
+        output = (
+            "____________________ test_add_float_numbers _____________________\n"
+            "\n"
+            "    def test_add_float_numbers():\n"
+            ">       assert math.isclose(add(0.1, 0.2), 0.3)\n"
+            "E       NameError: name 'math' is not defined. Did you forget to import 'math'\n"
+            "\n"
+            "test_validation_target.py:18: NameError\n"
+            "=========================== short test summary info ============================\n"
+            "FAILED test_validation_target.py::test_add_float_numbers - NameError: name 'm...\n"
+        )
+        problems = test_writer._classify_pytest_failures(output)
+        assert len(problems) == 1
+        assert "NameError" in problems[0]
+
+    def test_flags_collection_errors_via_untruncated_body(self) -> None:
+        # Collection errors (e.g. a bad import) don't even get an exception
+        # type in the short summary line ("ERROR test_validation_target.py",
+        # no "- SomeError" suffix) - only the body has it.
+        output = (
+            "__________________ ERROR collecting test_validation_target.py __________________\n"
+            "ImportError while importing test module '/workspace/test_validation_target.py'.\n"
+            "test_validation_target.py:2: in <module>\n"
+            "    import nonexistent_module\n"
+            "E   ModuleNotFoundError: No module named 'nonexistent_module'\n"
+            "=========================== short test summary info ============================\n"
+            "ERROR test_validation_target.py\n"
+        )
+        problems = test_writer._classify_pytest_failures(output)
+        assert len(problems) == 1
+        assert "ModuleNotFoundError" in problems[0]
+
 
 class TestValidateTestFileBeforeFreeze:
     """Regression coverage for the systemic bug behind repeated real

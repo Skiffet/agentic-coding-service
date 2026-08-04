@@ -651,15 +651,40 @@ def generate_stub_from_test(test_source: str, module_hint: str) -> str:
 
 _PYTEST_SUMMARY_LINE_RE = re.compile(r"^(?:FAILED|ERROR)\s+\S+(?:\s+-\s+([A-Za-z_][A-Za-z0-9_.]*))?", re.MULTILINE)
 
+# Pytest's own "-r" short summary line (what _PYTEST_SUMMARY_LINE_RE reads)
+# gets truncated to the terminal width when captured non-interactively - e.g.
+# "NotImplementedError" becomes "NotImplementedE..." once the test-id prefix
+# eats most of the default 80-column fallback (confirmed empirically via a
+# real sandboxed pytest run, not just in theory). That broke the exact
+# "NotImplementedError" string match below for any reasonably-descriptive
+# test name, misclassifying nearly every expected stub failure as a genuine
+# problem and rejecting well-formed test files. The per-failure traceback
+# body ("E   ExceptionType: ...") in the FAILURES/ERRORS section is never
+# truncated the same way, so it's read first; the summary line is now only a
+# fallback for output that doesn't contain a body block at all.
+_FAILURE_BLOCK_RE = re.compile(r"^_{3,}\s+(.+?)\s+_{3,}\s*$\n(.*?)(?=^_{3,}\s+\S|\Z)", re.MULTILINE | re.DOTALL)
+_EXCEPTION_TYPE_LINE_RE = re.compile(r"^E\s+([A-Za-z_][A-Za-z0-9_.]*):", re.MULTILINE)
+
 
 def _classify_pytest_failures(output: str) -> List[str]:
-    """Scan a pytest run's combined stdout/stderr for its short-summary
-    FAILED/ERROR lines and return the ones that are NOT our own injected
+    """Scan a pytest run's combined stdout/stderr for its FAILURES/ERRORS
+    entries and return the ones that are NOT our own injected
     NotImplementedError stub (i.e. genuine problems with the test file
     itself - a NameError, ImportError, SyntaxError, TypeError from a
-    wrong-arity call, etc. - independent of any real implementation).  An
+    wrong-arity call, etc. - independent of any real implementation). An
     empty return means every failure was expected (or there were none).
     """
+    blocks = _FAILURE_BLOCK_RE.findall(output)
+    if blocks:
+        problems = []
+        for name, body in blocks:
+            exc_match = _EXCEPTION_TYPE_LINE_RE.search(body)
+            exc_type = exc_match.group(1) if exc_match else None
+            if exc_type == "NotImplementedError":
+                continue
+            problems.append(f"{name} - {exc_type or 'unrecognized error (see full pytest output)'}")
+        return problems
+
     problems = []
     for match in _PYTEST_SUMMARY_LINE_RE.finditer(output):
         exc_type = match.group(1)
