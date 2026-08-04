@@ -1,0 +1,10 @@
+FROM qwen3:32b
+# Same reason as ollama/Modelfile (qwen2.5-coder:14b): Ollama's
+# OpenAI-compatible endpoint (/v1/chat/completions), which server_a/main.py
+# talks to via run_test_writer_loop's extra_body={"options": {"num_ctx": ...}},
+# silently ignores a per-request "num_ctx" option (confirmed on Ollama
+# 0.32.0). Baking num_ctx into the model itself is the only way that
+# reliably reaches the compat endpoint too - without this, Server A silently
+# runs at Ollama's 4096-token default instead of SERVER_A_MODEL_NUM_CTX
+# (16384), truncating RAG results / earlier conversation on long requirements.
+PARAMETER num_ctx 16384

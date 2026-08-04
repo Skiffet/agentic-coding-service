@@ -36,7 +36,25 @@ SERVER_A_BASE_URL: str = os.getenv("SERVER_A_BASE_URL", "http://localhost:8000")
 # Shared secret sent as the X-API-Key header on every call to Server A - must
 # match the SERVER_A_API_KEY configured on Server A itself.
 SERVER_A_API_KEY: str = os.getenv("SERVER_A_API_KEY", "")
-SERVER_A_REQUEST_TIMEOUT: int = _env_int("SERVER_A_REQUEST_TIMEOUT", 30)
+# This is not just one inference call - Server A's /generate-requirement
+# internally runs up to 6 iterations (test_writer._TEST_GEN_MAX_ITERATIONS)
+# against qwen3:32b on CPU-only hardware, so a low timeout here routinely
+# fires before Server A finishes and silently downgrades every run to the
+# local fallback (see the warning logged in agent_loop._generate_frozen_tests
+# when that happens).
+#
+# CPU decode is memory-bandwidth bound (~tokens/sec = bandwidth / model
+# size): on the documented hardware (Xeon Silver 4208, quad-channel DDR4,
+# ~40-50GB/s achievable) against a ~19-20GB Q4_K_M model, that's roughly
+# ~1-2.5 tokens/sec - so a single iteration generating a few hundred tokens
+# can itself take several minutes, before counting prefill on the
+# ever-growing 16384-token context. 3600s (1hr) budgets for 6 such
+# iterations with margin; this is still an estimate, not a measurement -
+# verify against real Server A hardware and adjust once actual per-iteration
+# timing is known. Must stay comfortably under ENDPOINT_TIMEOUT (below),
+# since phase 2 of the agent loop still needs to run afterwards; re-tune both
+# together.
+SERVER_A_REQUEST_TIMEOUT: int = _env_int("SERVER_A_REQUEST_TIMEOUT", 3600)
 
 _server_a_host = urlparse(SERVER_A_BASE_URL).hostname
 if _server_a_host not in ("localhost", "127.0.0.1") and not SERVER_A_API_KEY:
@@ -83,7 +101,14 @@ LOGS_DIR: str = os.getenv("LOGS_DIR", "logs")
 # Timeouts (seconds)
 WEB_SEARCH_TIMEOUT: int = _env_int("WEB_SEARCH_TIMEOUT", 10)
 TEST_RUN_TIMEOUT: int = _env_int("TEST_RUN_TIMEOUT", 60)
-ENDPOINT_TIMEOUT: int = _env_int("ENDPOINT_TIMEOUT", 480)
+# Wraps the *entire* /generate-code (or /refine) call: phase 1 (waiting on
+# Server A, up to SERVER_A_REQUEST_TIMEOUT above) plus phase 2 (this
+# machine's own GPU-backed agent loop, up to MAX_ITERATIONS). 480s was
+# calibrated for phase 2 alone, back when this was a single-server,
+# GPU-only setup; now that Server A's CPU-only phase 1 runs first in the
+# same request, the budget must cover both:
+# SERVER_A_REQUEST_TIMEOUT (3600s) + phase 2's original 480s + margin.
+ENDPOINT_TIMEOUT: int = _env_int("ENDPOINT_TIMEOUT", 4200)
 
 # Timeout for the phase-1 dynamic test-validation pytest run (a stub-backed
 # pre-check run before a test file is frozen, to catch things like a missing

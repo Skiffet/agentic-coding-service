@@ -257,6 +257,50 @@ def test_triple_quote_test_file_is_auto_repaired_during_test_generation() -> Non
     assert any(e.get("event") == "auto_repaired_triple_quote" for e in trace)
 
 
+def test_double_encoded_test_file_is_auto_unwrapped_during_test_generation() -> None:
+    """Regression test for a real, repeatedly-observed bug distinct from the
+    triple-quote one: the model wraps write_code's `content` in an EXTRA
+    layer of JSON-string encoding (syntactically valid JSON, so it parses
+    cleanly and silently corrupts the written file - unlike the
+    triple-quote case, this never even shows up as a malformed/rejected
+    tool call). Must be caught and unwrapped before the file is frozen.
+    """
+    responses = [
+        FakeCompletion(
+            FakeMessage(
+                tool_calls=[
+                    tool_call(
+                        "call_test",
+                        "write_code",
+                        # The exact double-encoded shape observed in real runs -
+                        # note this "content" argument value is ITSELF a JSON
+                        # string (quotes + \\n), not real multi-line text.
+                        {"filepath": "test_add.py", "content": '"from solution import add\\n\\ndef test_add():\\n    assert add(1, 2) == 3\\n"'},
+                    )
+                ]
+            )
+        ),
+        stop_turn(),
+    ]
+    client = FakeClient(responses)
+    files: Dict[str, str] = {}
+
+    frozen_files, frozen_contents, trace = test_writer.run_test_writer_loop(
+        client=client,
+        model_name="fake-model",
+        num_ctx=4096,
+        requirement="Write add(a, b), with a passing test.",
+        write_file=_make_write_file(files),
+    )
+
+    assert "test_add.py" in frozen_files
+    assert any(e.get("event") == "auto_unwrapped_double_encoded_content" for e in trace)
+    # The frozen content must be the UNWRAPPED, clean version - real
+    # newlines, no stray leading/trailing quote character.
+    assert frozen_contents["test_add.py"] == "from solution import add\n\ndef test_add():\n    assert add(1, 2) == 3\n"
+    assert files["test_add.py"] == "from solution import add\n\ndef test_add():\n    assert add(1, 2) == 3\n"
+
+
 def test_implementation_file_written_during_test_generation_is_rejected() -> None:
     """A model that writes both a real test file AND an implementation file
     (e.g. 'solution.py') during test generation must have the implementation
@@ -607,6 +651,55 @@ class TestExtractFallbackToolCallTypes:
         feedback = test_writer._build_malformed_tool_call_feedback(attempt)
         assert "triple-quote" not in feedback
         assert "unescaped double quote or backslash" in feedback
+
+
+class TestTryUnwrapDoubleEncodedString:
+    """Regression coverage for a real, repeatedly-observed bug: the model
+    wraps write_code's `content` value in an EXTRA layer of JSON-string
+    encoding - the decoded value itself starts/ends with a literal `"` and
+    uses doubled backslashes instead of real newlines. Unlike the
+    triple-quote bug, this is syntactically VALID JSON, so it parses
+    cleanly and silently corrupts the written file (e.g. `collected 0
+    items` - the whole file becomes one inert string literal). Confirmed
+    against real captured content from two independently failing sessions
+    (a trivial add(a,b) task and a parabola-evaluation task), both hitting
+    the exact same encoding shape.
+    """
+
+    def test_unwraps_real_captured_content_add_ab(self) -> None:
+        # Exact raw content from a real failing session (add(a, b)).
+        value = '"import pytest\\nfrom solution import add\\n\\ndef test_add():\\n    assert add(1, 2) == 3\\n    assert add(-1, 1) == 0\\n    assert add(0, 0) == 0\\n"'
+        result = test_writer._try_unwrap_double_encoded_string(value)
+        assert result == "import pytest\nfrom solution import add\n\ndef test_add():\n    assert add(1, 2) == 3\n    assert add(-1, 1) == 0\n    assert add(0, 0) == 0\n"
+
+    def test_unwraps_real_captured_content_parabola(self) -> None:
+        # Exact raw content from a real failing session (evaluate_parabola).
+        value = '"def evaluate_parabola(x):\\n    return 2 * x**2 - 3 * x + 1\\n"'
+        result = test_writer._try_unwrap_double_encoded_string(value)
+        assert result == "def evaluate_parabola(x):\n    return 2 * x**2 - 3 * x + 1\n"
+
+    def test_returns_none_for_normal_unwrapped_content(self) -> None:
+        # A normal, already-correct content value (doesn't start with a
+        # literal quote at all) must not be touched.
+        value = "def add(a, b):\n    return a + b\n"
+        assert test_writer._try_unwrap_double_encoded_string(value) is None
+
+    def test_returns_none_when_not_quote_wrapped(self) -> None:
+        assert test_writer._try_unwrap_double_encoded_string("def add(a, b): return a + b") is None
+
+    def test_returns_none_for_short_strings(self) -> None:
+        assert test_writer._try_unwrap_double_encoded_string('"') is None
+        assert test_writer._try_unwrap_double_encoded_string("") is None
+
+    def test_unwraps_quote_wrapped_content_containing_escaped_quotes(self) -> None:
+        # Sanity check the general shape works beyond the two real captured
+        # cases above - a value with escaped inner double-quotes.
+        value = '"{\\"a\\": 1}"'
+        assert test_writer._try_unwrap_double_encoded_string(value) == '{"a": 1}'
+
+    def test_returns_none_for_malformed_quote_wrapped_content(self) -> None:
+        value = '"unterminated \\'
+        assert test_writer._try_unwrap_double_encoded_string(value) is None
 
 
 class TestGenerateStubFromTest:

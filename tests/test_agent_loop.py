@@ -320,6 +320,54 @@ def test_triple_quote_write_code_is_auto_repaired_without_a_retry_turn(monkeypat
     assert "solution.py" in result["files"]
 
 
+def test_double_encoded_write_code_is_auto_unwrapped_in_implementation(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Regression test for a real, repeatedly-observed bug distinct from the
+    triple-quote one: the model wraps write_code's `content` argument value
+    in an EXTRA layer of JSON-string encoding - syntactically valid JSON, so
+    it parses cleanly and silently corrupts the written file (confirmed
+    against real captured content from two independently failing sessions,
+    including on the simplest possible task - it's not tied to difficulty).
+    Must be caught and unwrapped before the file is written to disk.
+    """
+    responses = [
+        # Phase 1
+        FakeCompletion(
+            FakeMessage(
+                tool_calls=[
+                    tool_call("call_test", "write_code", {"filepath": "test_add.py", "content": "from solution import add\n\ndef test_add():\n    assert add(1, 2) == 3\n"})
+                ]
+            )
+        ),
+        stop_turn(),
+        # Phase 2: "content" is itself a JSON-encoded string (double-encoded),
+        # sent via the real structured tool_calls path this time (not the
+        # plain-text fallback) - the bug isn't specific to either path.
+        FakeCompletion(
+            FakeMessage(
+                tool_calls=[
+                    tool_call(
+                        "call_1",
+                        "write_code",
+                        {"filepath": "solution.py", "content": '"def add(a, b):\\n    return a + b\\n"'},
+                    )
+                ]
+            )
+        ),
+        FakeCompletion(FakeMessage(tool_calls=[tool_call("call_2", "run_tests", {"command": "pytest"})])),
+    ]
+    _install_fake_client(monkeypatch, responses)
+
+    result = agent_loop.run_agent_loop(requirement="Write add(a, b).", session_id="double-encoded-session", max_iterations=5)
+
+    assert result["status"] == "success"
+    trace = result["trace_log"]
+    assert any(e.get("event") == "auto_unwrapped_double_encoded_content" for e in trace)
+    assert "solution.py" in result["files"]
+
+    written = (Path(agent_loop._session_dir("double-encoded-session")) / "solution.py").read_text()
+    assert written == "def add(a, b):\n    return a + b\n"
+
+
 def test_malformed_json_in_implementation_gets_corrective_feedback_and_recovers(monkeypatch: pytest.MonkeyPatch) -> None:
     """A JSON-shaped but broken (non-triple-quote) attempt must be logged as
     `malformed_tool_call_from_content` (distinct from a true no-tool-call)

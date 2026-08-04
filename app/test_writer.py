@@ -181,9 +181,13 @@ TEST_WRITER_TOOLS: List[Dict[str, Any]] = [RAG_SEARCH_TOOL, WEB_SEARCH_TOOL, WRI
 _TEST_WRITER_TOOL_NAMES = {"rag_search", "web_search", "write_code"}
 
 _MAX_MALFORMED_RETRIES = 3
-# Raised from 4 now that test generation can also spend iterations searching
-# (rag_search/web_search) before it writes files, not just writing them.
-_TEST_GEN_MAX_ITERATIONS = 8
+# Was 8 (raised from 4 so test generation can also spend iterations searching
+# via rag_search/web_search, not just writing files) - lowered back to 6 once
+# this loop started running against qwen3:32b on Server A's CPU-only
+# hardware (server_a/config.py), where each iteration is itself slow enough
+# that the worst-case total (see SERVER_A_REQUEST_TIMEOUT in app/config.py)
+# needed an explicit cap rather than being left to grow unbounded.
+_TEST_GEN_MAX_ITERATIONS = 6
 
 
 _TOOL_CALL_TAG_RE = re.compile(r"<tool_call>\s*(.*?)\s*</tool_call>", re.DOTALL)
@@ -306,6 +310,35 @@ def _try_triple_quote_repair(raw: str) -> Optional[str]:
 
     repaired, count = _TRIPLE_QUOTE_VALUE_RE.subn(_replace, raw)
     return repaired if count else None
+
+
+def _try_unwrap_double_encoded_string(value: str) -> Optional[str]:
+    """Some models occasionally wrap a `write_code` `content` argument value
+    in an EXTRA layer of JSON-string encoding - the already-decoded value
+    starts and ends with a literal `"` and uses doubled backslashes (e.g.
+    `"def add(a, b):\\n    return a + b\\n"` as the decoded Python value,
+    instead of the intended multi-line source with real newlines) - as if
+    it JSON-encoded a string that was already meant to be the final result.
+    This is syntactically VALID JSON (unlike the triple-quote case above),
+    so it parses cleanly and silently corrupts the file that gets written -
+    confirmed repeatedly across unrelated requirements in real runs (same
+    exact shape each time), including on the very simplest ones, so it is
+    not tied to task difficulty.
+
+    Detects the shape and recovers the intended value by parsing `value`
+    itself as a JSON string - the already-decoded value happens to itself
+    be valid JSON syntax for a string (quotes + escaped backslash-n), so
+    doing so peels off exactly the one extra layer of encoding. Returns
+    None if `value` isn't shaped like this or doesn't parse cleanly as a
+    string, so callers can tell "nothing to unwrap" apart from "unwrapped".
+    """
+    if len(value) < 2 or not (value.startswith('"') and value.endswith('"')):
+        return None
+    try:
+        unwrapped = json.loads(value)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    return unwrapped if isinstance(unwrapped, str) else None
 
 
 @dataclass(frozen=True)
@@ -977,6 +1010,19 @@ def run_test_writer_loop(
                     {"role": "tool", "tool_call_id": tool_call.id, "content": json.dumps({"error": error_msg})}
                 )
                 continue
+
+            if tool_name == "write_code" and isinstance(arguments.get("content"), str):
+                unwrapped_content = _try_unwrap_double_encoded_string(arguments["content"])
+                if unwrapped_content is not None:
+                    arguments["content"] = unwrapped_content
+                    trace.append(
+                        {
+                            "phase": "test_generation",
+                            "iteration": iteration,
+                            "event": "auto_unwrapped_double_encoded_content",
+                            "tool": tool_name,
+                        }
+                    )
 
             if tool_name not in _TEST_WRITER_TOOL_NAMES:
                 error_msg = (

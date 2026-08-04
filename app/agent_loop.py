@@ -48,6 +48,7 @@ from app.test_writer import (
     _extract_expected_modules,
     _extract_fallback_tool_call,
     _parse_json_loose,
+    _try_unwrap_double_encoded_string,
     run_test_writer_loop,
 )
 from app.tools import _session_dir, rag_search, run_tests, web_search, write_code
@@ -312,6 +313,12 @@ def _generate_frozen_tests(
                 frozen_contents[result["path"]] = content
         return frozen_files, frozen_contents, trace
 
+    logger.warning(
+        "Server A (session %s) did not return usable test files within "
+        "SERVER_A_REQUEST_TIMEOUT; falling back to the local test-writer "
+        "instead of the configured SERVER_A_MODEL_NAME.",
+        session_id,
+    )
     trace.append(
         {
             "phase": "test_generation",
@@ -494,6 +501,19 @@ def _run_implementation_loop(
                 messages.append({"role": "tool", "tool_call_id": tool_call.id, "content": json.dumps({"error": error_msg})})
                 malformed_streak += 1
                 continue
+
+            if tool_name == "write_code" and isinstance(arguments.get("content"), str):
+                unwrapped_content = _try_unwrap_double_encoded_string(arguments["content"])
+                if unwrapped_content is not None:
+                    arguments["content"] = unwrapped_content
+                    trace_log.append(
+                        {
+                            "phase": phase,
+                            "iteration": iteration,
+                            "event": "auto_unwrapped_double_encoded_content",
+                            "tool": tool_name,
+                        }
+                    )
 
             result = _dispatch_tool_call(tool_name, arguments, session_id, written_files, frozen_paths)
 

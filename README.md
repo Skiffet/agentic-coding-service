@@ -212,10 +212,12 @@ up if that local call itself fails, unrelated to Server A).
 ### Option A: Web UI
 
 Open **http://localhost:8080/** in a browser. Type a requirement (or click
-one of the example chips), hit **Generate Code**, and wait - it can take a
-few minutes since it's a real multi-step agent loop. The page shows the
-final status, the test output, each generated file (click to expand and
-view its content), and the full tool-call trace log.
+one of the example chips), hit **Generate Code**, and wait - it's a real
+multi-step agent loop, and if Server A is reachable, phase 1 alone can take
+tens of minutes on its CPU-only qwen3:32b (see `ENDPOINT_TIMEOUT` below).
+Without Server A (local fallback only) it's usually just a few minutes. The
+page shows the final status, the test output, each generated file (click to
+expand and view its content), and the full tool-call trace log.
 
 ### Option B: curl
 
@@ -251,8 +253,9 @@ Each request gets its own `session_id` (a UUID), and its files are written to
 `workspace/<session_id>/`, so concurrent requests never collide.
 
 `status` will be one of: `success`, `max_iterations_reached`, `error`, or
-`timeout` (if the whole request exceeds `ENDPOINT_TIMEOUT`, default 480s / 8
-minutes).
+`timeout` (if the whole request exceeds `ENDPOINT_TIMEOUT`, default 4200s /
+70 minutes - most of that budget covers phase 1 on Server A's CPU-only
+qwen3:32b, which is far slower than phase 2's GPU-backed loop on Server B).
 
 ### Refining an existing session
 
