@@ -901,22 +901,30 @@ behavior beyond what the requirement explicitly asks for."""
 
 def _generate_oracle_source(
     client: OpenAI, model_name: str, num_ctx: int, requirement: str, module_hint: str
-) -> Optional[str]:
+) -> Tuple[Optional[str], str]:
     """Ask the LLM for a standalone reference implementation of
     `module_hint` satisfying `requirement`, generated independently of (and
     never seen by) whichever process later writes the real implementation.
 
-    Returns the written source, or None if the model never produced a
-    well-formed write_code call within _ORACLE_MAX_ITERATIONS attempts or
+    Returns (source, detail). `source` is None if the model never produced
+    a well-formed write_code call within _ORACLE_MAX_ITERATIONS attempts or
     the call itself errored - a soft failure the caller must treat as
-    "couldn't check", never as "check passed".
+    "couldn't check", never as "check passed". `detail` is empty on
+    success; on failure it's a short, specific reason (which attempt,
+    which of the above) so a "skipped" outcome is diagnosable from the
+    trace log instead of just being an unexplained dead end - this
+    mechanism has a real, confirmed failure mode where it silently
+    skipped on a request that, tested manually with the exact same
+    request/response shape, actually succeeded immediately; without a
+    reason recorded, telling "the model struggled" apart from "an infra
+    hiccup" is guesswork.
     """
     messages: List[Dict[str, Any]] = [
         {"role": "system", "content": _ORACLE_SYSTEM_PROMPT.format(module_hint=module_hint)},
         {"role": "user", "content": f"Requirement:\n{requirement}"},
     ]
 
-    for _ in range(_ORACLE_MAX_ITERATIONS):
+    for attempt in range(1, _ORACLE_MAX_ITERATIONS + 1):
         try:
             completion = client.chat.completions.create(
                 model=model_name,
@@ -925,13 +933,13 @@ def _generate_oracle_source(
                 tool_choice="auto",
                 extra_body={"options": {"num_ctx": num_ctx}},
             )
-        except Exception:  # noqa: BLE001 - must never crash the caller
-            return None
+        except Exception as exc:  # noqa: BLE001 - must never crash the caller
+            return None, f"LLM call failed on attempt {attempt}/{_ORACLE_MAX_ITERATIONS}: {exc}"
 
         choice = completion.choices[0] if completion.choices else None
         message = choice.message if choice else None
         if message is None:
-            return None
+            return None, f"Empty response from LLM on attempt {attempt}/{_ORACLE_MAX_ITERATIONS}."
 
         tool_calls = getattr(message, "tool_calls", None) or []
         if not tool_calls:
@@ -961,9 +969,9 @@ def _generate_oracle_source(
             continue
 
         unwrapped = _try_unwrap_double_encoded_string(content)
-        return unwrapped if unwrapped is not None else content
+        return (unwrapped if unwrapped is not None else content), ""
 
-    return None
+    return None, f"Model never produced a usable write_code call within {_ORACLE_MAX_ITERATIONS} attempts."
 
 
 def check_test_against_oracle(
@@ -988,17 +996,23 @@ def check_test_against_oracle(
     failure/error to point at) returns outcome="skipped" - never "passed"
     or "failed" - so an infra hiccup here can't silently wave through a
     bad test the same way validate_test_file_before_freeze's dynamic check
-    once did.
+    once did. Every "skipped" carries a one-line reason in `errors` (never
+    shown to the model - only "failed" feedback is - purely so a skip is
+    diagnosable from the trace log instead of an unexplained dead end).
     """
-    oracle_source = _generate_oracle_source(client, model_name, num_ctx, requirement, module_hint)
+    oracle_source, gen_detail = _generate_oracle_source(client, model_name, num_ctx, requirement, module_hint)
     if oracle_source is None:
-        return OracleCheckResult(outcome="skipped", errors=[])
+        return OracleCheckResult(outcome="skipped", errors=[gen_detail])
 
     missing = find_missing_top_level_names(oracle_source, extract_required_names([test_source], module_hint))
-    if missing is None or missing:
-        # Problem with the oracle itself (syntax error, or it doesn't even
-        # define what the test needs) - not evidence the test is wrong.
-        return OracleCheckResult(outcome="skipped", errors=[])
+    if missing is None:
+        # Problem with the oracle itself, not evidence the test is wrong.
+        return OracleCheckResult(outcome="skipped", errors=["The generated reference implementation has a syntax error."])
+    if missing:
+        return OracleCheckResult(
+            outcome="skipped",
+            errors=[f"The generated reference implementation doesn't define: {', '.join(missing)}."],
+        )
 
     with tempfile.TemporaryDirectory(prefix="agentic-test-oracle-") as tmpdir:
         tmp_path = Path(tmpdir)
@@ -1010,7 +1024,10 @@ def check_test_against_oracle(
         )
 
     if result.get("timed_out"):
-        return OracleCheckResult(outcome="skipped", errors=[])
+        return OracleCheckResult(
+            outcome="skipped",
+            errors=[f"Sandboxed run against the reference implementation timed out after {TEST_GEN_VALIDATION_TIMEOUT}s."],
+        )
 
     if result.get("exit_code") == 0:
         return OracleCheckResult(outcome="passed", errors=[])
@@ -1020,7 +1037,13 @@ def check_test_against_oracle(
         # Nonzero exit with no recognizable pytest FAILURES/ERRORS output at
         # all usually means the sandbox run itself didn't work (missing
         # image, permission error, etc.), not that the test is wrong.
-        return OracleCheckResult(outcome="skipped", errors=[])
+        return OracleCheckResult(
+            outcome="skipped",
+            errors=[
+                f"Sandboxed run against the reference implementation produced no recognizable pytest "
+                f"output (exit_code={result.get('exit_code')}): {combined_output.strip()[:500]}"
+            ],
+        )
 
     return OracleCheckResult(
         outcome="failed",
@@ -1356,6 +1379,7 @@ def run_test_writer_loop(
                         "event": f"oracle_check_{oracle_result.outcome}",
                         "tool": tool_name,
                         "filepath": filepath,
+                        "detail": oracle_result.errors,
                     }
                 )
                 if oracle_result.outcome == "failed":

@@ -1045,7 +1045,11 @@ class TestOracleCheck:
         )
 
         assert result.outcome == "skipped"
-        assert result.errors == []
+        # A skip must always carry a reason - this is the mechanism's real,
+        # confirmed failure mode (production silently skipped on a request
+        # that, tested manually, actually succeeded) - without a reason
+        # recorded a skip is an unexplained dead end, not diagnosable.
+        assert result.errors and "3 attempts" in result.errors[0]
 
     def test_d_oracle_itself_defines_nothing_useful_is_skipped_not_failed(self) -> None:
         # The oracle model makes the exact same triple-quote mistake found
@@ -1093,7 +1097,7 @@ class TestOracleCheck:
         )
 
         assert result.outcome == "skipped"
-        assert result.errors == []
+        assert result.errors and "connection refused" in result.errors[0]
 
 
 def test_run_test_writer_loop_rejects_oracle_mismatch_then_freezes_the_corrected_retry(
