@@ -16,6 +16,7 @@ from typing import Any, Callable, Dict
 import pytest
 
 from app import test_writer
+from app.test_writer import check_test_against_oracle as _real_check_test_against_oracle
 from tests.fakes import FakeClient, FakeCompletion, FakeMessage, FakeToolCall, stop_turn, tool_call
 
 
@@ -25,6 +26,16 @@ def _sandbox_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
     # a generated stub - keep that on the host so this suite doesn't require
     # Docker (sandboxed behavior itself is covered in tests/test_tools.py).
     monkeypatch.setattr("app.tools.SANDBOX_ENABLED", False)
+    # Default the pre-freeze oracle cross-check to "skipped" so existing
+    # tests' scripted responses don't need an extra turn per
+    # test-generation write_code call just for this - tests that exercise
+    # the oracle check itself (TestOracleCheck below) override this
+    # explicitly.
+    monkeypatch.setattr(
+        test_writer,
+        "check_test_against_oracle",
+        lambda *args, **kwargs: test_writer.OracleCheckResult(outcome="skipped", errors=[]),
+    )
 
 
 def _make_write_file(files: Dict[str, str]) -> Callable[[str, str], Dict[str, Any]]:
@@ -882,3 +893,290 @@ class TestValidateTestFileBeforeFreeze:
         assert result.stage == "dynamic"
         assert "timed out" in result.errors[0].lower()
         assert "FAILED" not in result.errors[0]  # distinct from a pytest-summary-line style error
+
+
+class TestFindMissingTopLevelNames:
+    """Regression coverage for the implementation-phase counterpart of the
+    same 'frozen test can never pass no matter what' failure mode: a
+    written module.py that parses fine but doesn't actually define what the
+    frozen test imports (e.g. real code left inside a triple-quoted
+    string) - see app/agent_loop.py's _dispatch_tool_call for where this is
+    used to reject such a write before it ever touches disk.
+    """
+
+    def test_a_required_name_missing_is_reported(self) -> None:
+        source = "def add(a, b):\n    return a + b\n"
+        assert test_writer.find_missing_top_level_names(source, {"subtract"}) == ["subtract"]
+
+    def test_b_required_name_present_is_not_reported(self) -> None:
+        source = "def add(a, b):\n    return a + b\n"
+        assert test_writer.find_missing_top_level_names(source, {"add"}) == []
+
+    def test_c_real_bug_code_wrapped_in_triple_quoted_string_defines_nothing(self) -> None:
+        # The exact content written - repeatedly, across 5 separate attempts
+        # in one real session - for a rational_func requirement: valid
+        # Python, but the whole module is just a docstring, so
+        # rational_func is never actually a name in the module.
+        source = (
+            '"""\n'
+            "def rational_func(x):\n"
+            "    if x == 1:\n"
+            "        raise ValueError('Division by zero')\n"
+            "    return (x**2 - 1) / (x - 1)\n"
+            '"""\n'
+        )
+        assert test_writer.find_missing_top_level_names(source, {"rational_func"}) == ["rational_func"]
+
+    def test_d_syntax_error_returns_none_not_a_missing_list(self) -> None:
+        # A real SyntaxError is a different, already-surfaced problem
+        # (pytest collection reports it clearly on its own) - this check
+        # must not also complain about it as "missing names".
+        assert test_writer.find_missing_top_level_names("def broken(:\n", {"broken"}) is None
+
+    def test_e_no_required_names_is_trivially_satisfied(self) -> None:
+        assert test_writer.find_missing_top_level_names("x = 1\n", set()) == []
+
+    def test_f_name_defined_via_assignment_or_import_counts(self) -> None:
+        source = "from math import isclose as add\n"
+        assert test_writer.find_missing_top_level_names(source, {"add"}) == []
+
+    def test_g_name_defined_only_inside_another_function_does_not_count(self) -> None:
+        # Nested definitions aren't importable from the module - this is
+        # what makes ast.walk() the wrong tool here (it would find this).
+        source = "def outer():\n    def add(a, b):\n        return a + b\n    return add\n"
+        assert test_writer.find_missing_top_level_names(source, {"add"}) == ["add"]
+
+
+class TestExtractRequiredNames:
+    def test_from_import_names_are_required(self) -> None:
+        test_source = "from solution import add, subtract\n\ndef test_x():\n    assert add(1, 2) == 3\n"
+        assert test_writer.extract_required_names([test_source], "solution") == {"add", "subtract"}
+
+    def test_attribute_calls_on_a_bare_import_are_required(self) -> None:
+        test_source = "import solution\n\ndef test_x():\n    assert solution.add(1, 2) == 3\n"
+        assert test_writer.extract_required_names([test_source], "solution") == {"add"}
+
+    def test_unrelated_module_names_are_ignored(self) -> None:
+        test_source = "from other_module import thing\n\ndef test_x():\n    assert thing() == 1\n"
+        assert test_writer.extract_required_names([test_source], "solution") == set()
+
+
+class TestOracleCheck:
+    """Coverage for check_test_against_oracle: cross-checking a not-yet-
+    frozen test's hardcoded expected value(s) against an independently
+    generated reference implementation, before freezing - see its
+    docstring in app/test_writer.py for the real failure mode this targets
+    (a frozen test with e.g. `assert f(-2) == -3` when the correct value is
+    -1, which the implementation phase can never fix once frozen).
+    """
+
+    def test_a_oracle_agrees_with_test_reports_passed(self) -> None:
+        client = FakeClient(
+            [
+                FakeCompletion(
+                    FakeMessage(
+                        tool_calls=[
+                            tool_call(
+                                "call_oracle",
+                                "write_code",
+                                {"filepath": "solution.py", "content": "def add(a, b):\n    return a + b\n"},
+                            )
+                        ]
+                    )
+                )
+            ]
+        )
+        test_source = "from solution import add\n\ndef test_add():\n    assert add(1, 2) == 3\n"
+
+        result = _real_check_test_against_oracle(
+            client, "fake-model", 4096, "Write add(a, b), with a passing test.", test_source, "solution"
+        )
+
+        assert result.outcome == "passed"
+        assert result.errors == []
+
+    def test_b_oracle_disagrees_with_test_reports_failed(self) -> None:
+        # Reproduces the real bug found in production: a frozen test
+        # hardcoded rational_func(-2) == -3, but every straightforward
+        # implementation of (x**2 - 1) / (x - 1) gives -1 at x = -2.
+        client = FakeClient(
+            [
+                FakeCompletion(
+                    FakeMessage(
+                        tool_calls=[
+                            tool_call(
+                                "call_oracle",
+                                "write_code",
+                                {
+                                    "filepath": "solution.py",
+                                    "content": (
+                                        "def rational_func(x):\n"
+                                        "    if x == 1:\n"
+                                        "        raise ZeroDivisionError('undefined at x=1')\n"
+                                        "    return (x**2 - 1) / (x - 1)\n"
+                                    ),
+                                },
+                            )
+                        ]
+                    )
+                )
+            ]
+        )
+        test_source = (
+            "from solution import rational_func\n\n"
+            "def test_rational_func():\n"
+            "    assert rational_func(-2) == -3\n"
+        )
+
+        result = _real_check_test_against_oracle(
+            client, "fake-model", 4096, "Write rational_func(x) = (x**2-1)/(x-1).", test_source, "solution"
+        )
+
+        assert result.outcome == "failed"
+        assert result.errors
+        assert "rational_func" in result.errors[0]
+
+    def test_c_oracle_generation_never_produces_a_tool_call_is_skipped_not_failed(self) -> None:
+        client = FakeClient([stop_turn(), stop_turn(), stop_turn()])
+        test_source = "from solution import add\n\ndef test_add():\n    assert add(1, 2) == 3\n"
+
+        result = _real_check_test_against_oracle(
+            client, "fake-model", 4096, "Write add(a, b), with a passing test.", test_source, "solution"
+        )
+
+        assert result.outcome == "skipped"
+        assert result.errors == []
+
+    def test_d_oracle_itself_defines_nothing_useful_is_skipped_not_failed(self) -> None:
+        # The oracle model makes the exact same triple-quote mistake found
+        # in real logs - that's a problem with the oracle, not evidence the
+        # test's expected values are wrong, so this must not report
+        # "failed" (which would incorrectly block a possibly-fine test).
+        client = FakeClient(
+            [
+                FakeCompletion(
+                    FakeMessage(
+                        tool_calls=[
+                            tool_call(
+                                "call_oracle",
+                                "write_code",
+                                {"filepath": "solution.py", "content": '"""\ndef add(a, b):\n    return a + b\n"""\n'},
+                            )
+                        ]
+                    )
+                )
+            ]
+        )
+        test_source = "from solution import add\n\ndef test_add():\n    assert add(1, 2) == 3\n"
+
+        result = _real_check_test_against_oracle(
+            client, "fake-model", 4096, "Write add(a, b), with a passing test.", test_source, "solution"
+        )
+
+        assert result.outcome == "skipped"
+
+    def test_e_llm_error_generating_oracle_is_skipped_not_failed(self) -> None:
+        class _ExplodingCompletions:
+            def create(self, **kwargs: Any) -> Any:
+                raise RuntimeError("connection refused")
+
+        class _ExplodingChat:
+            completions = _ExplodingCompletions()
+
+        class _ExplodingClient:
+            chat = _ExplodingChat()
+
+        test_source = "from solution import add\n\ndef test_add():\n    assert add(1, 2) == 3\n"
+
+        result = _real_check_test_against_oracle(
+            _ExplodingClient(), "fake-model", 4096, "Write add(a, b), with a passing test.", test_source, "solution"
+        )
+
+        assert result.outcome == "skipped"
+        assert result.errors == []
+
+
+def test_run_test_writer_loop_rejects_oracle_mismatch_then_freezes_the_corrected_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End-to-end: the model first writes a test with a wrong hardcoded
+    expected value, gets rejected by the oracle cross-check (not by
+    validate_test_file_before_freeze - the stub-based check can't catch
+    this, only a real reference implementation can), sees the rejection
+    feedback, and freezes a corrected version on retry.
+
+    Uses the real check_test_against_oracle (undoing the module-wide
+    default-skip patch from the _sandbox_disabled fixture) since this test
+    exists specifically to exercise that mechanism end-to-end.
+    """
+    monkeypatch.setattr(test_writer, "check_test_against_oracle", _real_check_test_against_oracle)
+
+    oracle_source = {
+        "filepath": "solution.py",
+        "content": (
+            "def rational_func(x):\n"
+            "    if x == 1:\n"
+            "        raise ZeroDivisionError('undefined at x=1')\n"
+            "    return (x**2 - 1) / (x - 1)\n"
+        ),
+    }
+    responses = [
+        # Attempt 1: test with a wrong hardcoded value.
+        FakeCompletion(
+            FakeMessage(
+                tool_calls=[
+                    tool_call(
+                        "call_test_1",
+                        "write_code",
+                        {
+                            "filepath": "test_rational_func.py",
+                            "content": (
+                                "from solution import rational_func\n\n"
+                                "def test_rational_func():\n"
+                                "    assert rational_func(-2) == -3\n"
+                            ),
+                        },
+                    )
+                ]
+            )
+        ),
+        # Oracle call triggered by attempt 1's validation passing.
+        FakeCompletion(FakeMessage(tool_calls=[tool_call("call_oracle_1", "write_code", oracle_source)])),
+        # Attempt 2: corrected value, after seeing the rejection feedback.
+        FakeCompletion(
+            FakeMessage(
+                tool_calls=[
+                    tool_call(
+                        "call_test_2",
+                        "write_code",
+                        {
+                            "filepath": "test_rational_func.py",
+                            "content": (
+                                "from solution import rational_func\n\n"
+                                "def test_rational_func():\n"
+                                "    assert rational_func(-2) == -1\n"
+                            ),
+                        },
+                    )
+                ]
+            )
+        ),
+        # Oracle call triggered by attempt 2's validation passing.
+        FakeCompletion(FakeMessage(tool_calls=[tool_call("call_oracle_2", "write_code", oracle_source)])),
+        stop_turn(),
+    ]
+    client = FakeClient(responses)
+    files: Dict[str, str] = {}
+
+    frozen_files, frozen_contents, trace = test_writer.run_test_writer_loop(
+        client=client,
+        model_name="fake-model",
+        num_ctx=4096,
+        requirement="Write rational_func(x) = (x**2-1)/(x-1).",
+        write_file=_make_write_file(files),
+    )
+
+    assert "test_rational_func.py" in frozen_files
+    assert "rational_func(-2) == -1" in frozen_contents["test_rational_func.py"]
+    assert any(e.get("event") == "oracle_check_failed" for e in trace)
+    assert any(e.get("event") == "oracle_check_passed" for e in trace)

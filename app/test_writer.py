@@ -25,7 +25,7 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Callable, Dict, List, Literal, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Literal, Optional, Set, Tuple, Union
 
 from openai import APIConnectionError, APIError, APIStatusError, OpenAI
 
@@ -650,6 +650,71 @@ def _find_stub_targets(tree: ast.AST, module_hint: str) -> Dict[str, Optional[in
     return counts
 
 
+def extract_required_names(test_contents: List[str], module_hint: str) -> Set[str]:
+    """Union, across every frozen test file in `test_contents`, of every name
+    a test needs `module_hint` to define at the top level - same
+    from-import/attribute-call detection as `_find_stub_targets`, just
+    collapsed to a plain set of names (call arity doesn't matter here).
+
+    Used by the implementation phase to catch a written module that doesn't
+    actually define what the frozen test imports (e.g. the real code ended
+    up wrapped inside a triple-quoted string, so nothing is actually
+    defined) before burning a run_tests iteration on it - see
+    find_missing_top_level_names.
+    """
+    names: Set[str] = set()
+    for content in test_contents:
+        try:
+            tree = ast.parse(content)
+        except SyntaxError:
+            continue
+        names.update(_find_stub_targets(tree, module_hint).keys())
+    return names
+
+
+def find_missing_top_level_names(source: str, required_names: Set[str]) -> Optional[List[str]]:
+    """Return the subset of `required_names` NOT bound as a top-level name in
+    `source` (via def/class/assignment/import), sorted. Returns None if
+    `source` itself has a SyntaxError - that's a different, already-surfaced
+    problem, not this check's job to report.
+
+    Only looks at `tree.body` (top-level statements), not every node in the
+    tree (unlike `_find_stub_targets`, which deliberately does want nested
+    call sites) - a name defined inside another function/class isn't
+    importable from the module, so a nested match must not count as
+    "defined". This is also what catches the real, observed failure mode:
+    an entire implementation accidentally left inside a triple-quoted string
+    (a docstring) parses fine and is syntactically valid, but defines
+    nothing at all at the top level.
+    """
+    if not required_names:
+        return []
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return None
+
+    defined: Set[str] = set()
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            defined.add(node.name)
+        elif isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    defined.add(target.id)
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            defined.add(node.target.id)
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                defined.add((alias.asname or alias.name).split(".")[0])
+        elif isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                if alias.name != "*":
+                    defined.add(alias.asname or alias.name)
+
+    return sorted(name for name in required_names if name not in defined)
+
+
 def generate_stub_from_test(test_source: str, module_hint: str) -> str:
     """Generate a throwaway Python module (source text) that defines every
     name `test_source` imports from `module_hint` (or accesses as an
@@ -802,6 +867,168 @@ def validate_test_file_before_freeze(test_source: str, module_hint: str) -> Vali
         return ValidationResult(is_valid=False, errors=problems, stage="dynamic")
 
     return ValidationResult(is_valid=True, errors=[], stage=None)
+
+
+@dataclass(frozen=True)
+class OracleCheckResult:
+    """Outcome of cross-checking a not-yet-frozen test's hardcoded expected
+    value(s) against an independently-generated reference implementation
+    (see check_test_against_oracle). "skipped" is kept as a distinct
+    outcome from "passed" rather than collapsing both into one boolean -
+    validate_test_file_before_freeze's dynamic check already had a bug once
+    (see _classify_pytest_failures' git history) where "couldn't determine"
+    silently became "no problems found"; this keeps that failure mode from
+    recurring here by construction.
+    """
+
+    outcome: Literal["passed", "failed", "skipped"]
+    errors: List[str]
+
+
+_ORACLE_MAX_ITERATIONS = 3
+
+_ORACLE_SYSTEM_PROMPT = """You are a reference-implementation writer used \
+only to sanity-check a test file's hardcoded expected values before it's \
+frozen - your output is never shown to whoever writes the real \
+implementation later, and is never persisted anywhere permanent.
+
+You will be given a software requirement. Call `write_code` exactly once, \
+with filepath '{module_hint}.py', containing ONLY a correct, \
+straightforward Python implementation that satisfies the requirement - no \
+test code, no explanations, no extra commentary, and no defensive \
+behavior beyond what the requirement explicitly asks for."""
+
+
+def _generate_oracle_source(
+    client: OpenAI, model_name: str, num_ctx: int, requirement: str, module_hint: str
+) -> Optional[str]:
+    """Ask the LLM for a standalone reference implementation of
+    `module_hint` satisfying `requirement`, generated independently of (and
+    never seen by) whichever process later writes the real implementation.
+
+    Returns the written source, or None if the model never produced a
+    well-formed write_code call within _ORACLE_MAX_ITERATIONS attempts or
+    the call itself errored - a soft failure the caller must treat as
+    "couldn't check", never as "check passed".
+    """
+    messages: List[Dict[str, Any]] = [
+        {"role": "system", "content": _ORACLE_SYSTEM_PROMPT.format(module_hint=module_hint)},
+        {"role": "user", "content": f"Requirement:\n{requirement}"},
+    ]
+
+    for _ in range(_ORACLE_MAX_ITERATIONS):
+        try:
+            completion = client.chat.completions.create(
+                model=model_name,
+                messages=messages,
+                tools=[WRITE_CODE_TOOL],
+                tool_choice="auto",
+                extra_body={"options": {"num_ctx": num_ctx}},
+            )
+        except Exception:  # noqa: BLE001 - must never crash the caller
+            return None
+
+        choice = completion.choices[0] if completion.choices else None
+        message = choice.message if choice else None
+        if message is None:
+            return None
+
+        tool_calls = getattr(message, "tool_calls", None) or []
+        if not tool_calls:
+            extraction = _extract_fallback_tool_call(message.content)
+            if isinstance(extraction, RecoveredToolCall):
+                tool_calls = [extraction.call]
+
+        if not tool_calls:
+            messages.append({"role": "assistant", "content": message.content or ""})
+            messages.append({"role": "user", "content": "You must call write_code exactly once."})
+            continue
+
+        tool_call = tool_calls[0]
+        try:
+            arguments = _parse_json_loose(tool_call.function.arguments or "{}")
+            if not isinstance(arguments, dict):
+                raise ValueError("Arguments must be a JSON object.")
+        except (json.JSONDecodeError, ValueError):
+            messages.append({"role": "assistant", "content": message.content or ""})
+            messages.append(
+                {"role": "user", "content": "That write_code call had malformed JSON arguments. Try again."}
+            )
+            continue
+
+        content = arguments.get("content")
+        if not isinstance(content, str) or not content.strip():
+            continue
+
+        unwrapped = _try_unwrap_double_encoded_string(content)
+        return unwrapped if unwrapped is not None else content
+
+    return None
+
+
+def check_test_against_oracle(
+    client: OpenAI, model_name: str, num_ctx: int, requirement: str, test_source: str, module_hint: str
+) -> OracleCheckResult:
+    """Cross-check `test_source`'s hardcoded expected value(s) against an
+    independently-generated reference implementation of `module_hint`,
+    before the test is frozen (see run_test_writer_loop).
+
+    This is a consistency check, not a correctness proof: if the oracle and
+    the test share the same misunderstanding of the requirement, this won't
+    catch it. What it does catch is the failure mode actually observed
+    repeatedly in production logs: a hardcoded expected value that's simply
+    wrong arithmetic (e.g. `assert f(-2) == -3` when every straightforward
+    implementation of the stated formula gives -1) - something a frozen
+    test can never recover from once the implementation phase starts,
+    because it can't touch the test file at all.
+
+    Any failure to actually run the check (oracle generation failed, the
+    oracle itself doesn't define what the test needs, the sandboxed run
+    timed out, or produced output with no recognizable pytest
+    failure/error to point at) returns outcome="skipped" - never "passed"
+    or "failed" - so an infra hiccup here can't silently wave through a
+    bad test the same way validate_test_file_before_freeze's dynamic check
+    once did.
+    """
+    oracle_source = _generate_oracle_source(client, model_name, num_ctx, requirement, module_hint)
+    if oracle_source is None:
+        return OracleCheckResult(outcome="skipped", errors=[])
+
+    missing = find_missing_top_level_names(oracle_source, extract_required_names([test_source], module_hint))
+    if missing is None or missing:
+        # Problem with the oracle itself (syntax error, or it doesn't even
+        # define what the test needs) - not evidence the test is wrong.
+        return OracleCheckResult(outcome="skipped", errors=[])
+
+    with tempfile.TemporaryDirectory(prefix="agentic-test-oracle-") as tmpdir:
+        tmp_path = Path(tmpdir)
+        (tmp_path / f"{module_hint}.py").write_text(oracle_source, encoding="utf-8")
+        (tmp_path / "test_validation_target.py").write_text(test_source, encoding="utf-8")
+
+        result = app_tools.run_command_in_directory(
+            tmp_path, "pytest -q -rfE test_validation_target.py", TEST_GEN_VALIDATION_TIMEOUT
+        )
+
+    if result.get("timed_out"):
+        return OracleCheckResult(outcome="skipped", errors=[])
+
+    if result.get("exit_code") == 0:
+        return OracleCheckResult(outcome="passed", errors=[])
+
+    combined_output = (result.get("stdout") or "") + "\n" + (result.get("stderr") or "")
+    if not (_FAILURE_BLOCK_RE.search(combined_output) or _PYTEST_SUMMARY_LINE_RE.search(combined_output)):
+        # Nonzero exit with no recognizable pytest FAILURES/ERRORS output at
+        # all usually means the sandbox run itself didn't work (missing
+        # image, permission error, etc.), not that the test is wrong.
+        return OracleCheckResult(outcome="skipped", errors=[])
+
+    return OracleCheckResult(
+        outcome="failed",
+        errors=[
+            "Running this test against an independently-generated reference "
+            "implementation of the same requirement failed:\n" + combined_output.strip()
+        ],
+    )
 
 
 def _dispatch_test_writer_tool_call(
@@ -1113,6 +1340,31 @@ def run_test_writer_loop(
                             "stage": validation.stage,
                             "errors": validation.errors,
                         }
+                    )
+                    messages.append(
+                        {"role": "tool", "tool_call_id": tool_call.id, "content": json.dumps({"error": error_msg})}
+                    )
+                    continue
+
+                oracle_result = check_test_against_oracle(
+                    client, model_name, num_ctx, requirement, test_content, candidate_module_hint
+                )
+                trace.append(
+                    {
+                        "phase": "test_generation",
+                        "iteration": iteration,
+                        "event": f"oracle_check_{oracle_result.outcome}",
+                        "tool": tool_name,
+                        "filepath": filepath,
+                    }
+                )
+                if oracle_result.outcome == "failed":
+                    error_msg = (
+                        "Rejected: this test file's hardcoded expected value(s) don't match "
+                        "an independently generated reference implementation of the same "
+                        "requirement, and was NOT written or frozen. Double-check your "
+                        "arithmetic/logic for every assertion against the requirement:\n"
+                        + "\n".join(oracle_result.errors)
                     )
                     messages.append(
                         {"role": "tool", "tool_call_id": tool_call.id, "content": json.dumps({"error": error_msg})}

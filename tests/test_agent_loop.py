@@ -28,7 +28,7 @@ from typing import List
 
 import pytest
 
-from app import agent_loop
+from app import agent_loop, test_writer
 from tests.fakes import FakeClient, FakeCompletion, FakeMessage, FakeToolCall, stop_turn, tool_call
 
 
@@ -57,6 +57,15 @@ def _isolate_workspace(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     # Default to "eval formatting unavailable" so existing tests' scripted
     # responses don't need an extra turn per run_tests call for this.
     monkeypatch.setattr(agent_loop, "_format_eval_locally", lambda client, test_result: None)
+    # Default the pre-freeze oracle cross-check (see test_writer.py) to
+    # "skipped" so existing tests' scripted responses don't need an extra
+    # turn per test-generation write_code call just for this - tests that
+    # exercise the oracle check itself override this explicitly.
+    monkeypatch.setattr(
+        test_writer,
+        "check_test_against_oracle",
+        lambda *args, **kwargs: test_writer.OracleCheckResult(outcome="skipped", errors=[]),
+    )
 
 
 def test_implementation_tools_include_search_and_run_tests() -> None:

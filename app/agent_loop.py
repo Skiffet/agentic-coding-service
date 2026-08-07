@@ -49,6 +49,8 @@ from app.test_writer import (
     _extract_fallback_tool_call,
     _parse_json_loose,
     _try_unwrap_double_encoded_string,
+    extract_required_names,
+    find_missing_top_level_names,
     run_test_writer_loop,
 )
 from app.tools import _session_dir, rag_search, run_tests, web_search, write_code
@@ -225,6 +227,7 @@ def _dispatch_tool_call(
     session_id: str,
     written_files: List[str],
     frozen_paths: Optional[Set[Any]] = None,
+    required_names_by_module: Optional[Dict[str, Set[str]]] = None,
 ) -> Any:
     """Execute a single tool call and return its raw result (never raises)."""
     if tool_name == "rag_search":
@@ -262,6 +265,26 @@ def _dispatch_tool_call(
                         "modified. Write your implementation to a different file."
                     ),
                 }
+
+        if required_names_by_module and isinstance(content, str):
+            required = required_names_by_module.get(Path(filepath).stem)
+            if required:
+                missing = find_missing_top_level_names(content, required)
+                if missing:
+                    return {
+                        "success": False,
+                        "path": filepath,
+                        "error": (
+                            f"Rejected: '{filepath}' does not define {', '.join(missing)} "
+                            "at the module's top level (checked via AST), so the frozen "
+                            "test's import of it will fail. This file was NOT written. "
+                            "Common cause: the real code ended up wrapped inside a "
+                            'triple-quoted string (e.g. \'"""...code...""" \') or a '
+                            "comment instead of being actual, executable Python source - "
+                            "remove any such wrapping and write only real code, with no "
+                            "surrounding quotes."
+                        ),
+                    }
 
         result = write_code(filepath=filepath, content=content, session_id=session_id)
         if result.get("success"):
@@ -358,6 +381,7 @@ def _run_implementation_loop(
     max_iterations: int,
     frozen_paths: Set[Any],
     phase: str = "implementation",
+    required_names_by_module: Optional[Dict[str, Set[str]]] = None,
 ) -> Dict[str, Any]:
     """Shared loop: call the LLM with the 4 implementation-phase tools, apply
     fallback tool-call recovery, dispatch tool calls (respecting
@@ -515,7 +539,9 @@ def _run_implementation_loop(
                         }
                     )
 
-            result = _dispatch_tool_call(tool_name, arguments, session_id, written_files, frozen_paths)
+            result = _dispatch_tool_call(
+                tool_name, arguments, session_id, written_files, frozen_paths, required_names_by_module
+            )
 
             if tool_name == "run_tests" and isinstance(result, dict):
                 formatted_eval = _format_eval_locally(client, result)
@@ -565,13 +591,18 @@ def run_agent_loop(
     trace_log.extend(test_gen_trace)
 
     frozen_paths: Set[Any] = set()
+    required_names_by_module: Dict[str, Set[str]] = {}
     if frozen_files:
         for path in frozen_files:
             resolved = _resolve_session_path(session_id, path)
             if resolved is not None:
                 frozen_paths.add(resolved)
 
-        module_hint = _build_module_hint(_extract_expected_modules(list(frozen_contents.values())))
+        expected_modules = _extract_expected_modules(list(frozen_contents.values()))
+        required_names_by_module = {
+            module: extract_required_names(list(frozen_contents.values()), module) for module in expected_modules
+        }
+        module_hint = _build_module_hint(expected_modules)
         implementation_prompt = IMPLEMENTATION_SYSTEM_PROMPT_WITH_FROZEN_TESTS.format(
             frozen_files=", ".join(frozen_files), module_hint=module_hint
         )
@@ -591,7 +622,9 @@ def run_agent_loop(
     ]
 
     client = _make_client()
-    loop_result = _run_implementation_loop(client, messages, session_id, max_iterations, frozen_paths)
+    loop_result = _run_implementation_loop(
+        client, messages, session_id, max_iterations, frozen_paths, required_names_by_module=required_names_by_module
+    )
     trace_log.extend(loop_result["trace_log"])
 
     all_files = list(frozen_files)
@@ -656,7 +689,12 @@ def refine_agent_loop(
         if resolved is not None:
             frozen_paths.add(resolved)
 
-    module_hint = _build_module_hint(_extract_expected_modules([existing_files[p] for p in frozen_files]))
+    frozen_test_contents = [existing_files[p] for p in frozen_files]
+    expected_modules = _extract_expected_modules(frozen_test_contents)
+    required_names_by_module = {
+        module: extract_required_names(frozen_test_contents, module) for module in expected_modules
+    }
+    module_hint = _build_module_hint(expected_modules)
 
     files_summary = (
         "\n\n".join(f"--- {path} ---\n{content}" for path, content in existing_files.items())
@@ -675,7 +713,15 @@ def refine_agent_loop(
         {"role": "user", "content": f"New instruction: {instruction}"},
     ]
 
-    loop_result = _run_implementation_loop(client, messages, session_id, max_iterations, frozen_paths, phase="refine")
+    loop_result = _run_implementation_loop(
+        client,
+        messages,
+        session_id,
+        max_iterations,
+        frozen_paths,
+        phase="refine",
+        required_names_by_module=required_names_by_module,
+    )
 
     all_files = list(existing_files.keys())
     for f in loop_result["files"]:
