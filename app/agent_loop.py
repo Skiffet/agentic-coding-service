@@ -317,6 +317,15 @@ def _generate_frozen_tests(
     remote = server_a_client.generate_requirement(requirement)
     if remote and isinstance(remote.get("test_files"), dict) and remote["test_files"]:
         trace.append({"phase": "test_generation", "event": "server_a_requirement_used"})
+        # Server A ran the exact same run_test_writer_loop as the local
+        # fallback below (rag_search / web_search / write_code retries,
+        # including anything validate_test_file_before_freeze rejected
+        # along the way) and returns its own trace of that - without this,
+        # a successful Server A run showed nothing but the final accepted
+        # file, discarding everything Server A actually did to get there.
+        remote_trace = remote.get("trace")
+        if isinstance(remote_trace, list):
+            trace.extend(entry for entry in remote_trace if isinstance(entry, dict))
         frozen_files: List[str] = []
         frozen_contents: Dict[str, str] = {}
         for filepath, content in remote["test_files"].items():

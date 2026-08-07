@@ -530,6 +530,78 @@ def test_server_a_requirement_used_skips_local_test_writer(monkeypatch: pytest.M
     assert fake_client.chat.completions.calls == 2
 
 
+def test_server_a_own_trace_is_forwarded_not_discarded(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Server A's /generate-requirement response includes its own trace of
+    what it did to arrive at the accepted test file(s) (rag_search,
+    web_search, any write_code attempts validate_test_file_before_freeze
+    rejected along the way) - a successful Server A run must surface that,
+    not just a bare 'server_a_requirement_used' marker with everything
+    Server A actually did silently dropped.
+    """
+    server_a_internal_trace = [
+        {"phase": "test_generation", "iteration": 1, "event": "tool_call", "tool": "rag_search", "input": {"query": "add function"}, "output": "some rag context"},
+        {"phase": "test_generation", "iteration": 2, "event": "tool_call", "tool": "write_code", "input": {"filepath": "test_add.py"}, "output": {"success": True, "path": "test_add.py", "error": None}},
+    ]
+    monkeypatch.setattr(
+        agent_loop.server_a_client,
+        "generate_requirement",
+        lambda requirement: {
+            "requirement": requirement,
+            "test_files": {"test_add.py": "from solution import add\n\ndef test_add():\n    assert add(1, 2) == 3\n"},
+            "trace": server_a_internal_trace,
+        },
+    )
+    responses = [
+        FakeCompletion(
+            FakeMessage(tool_calls=[tool_call("call_1", "write_code", {"filepath": "solution.py", "content": "def add(a, b):\n    return a + b\n"})])
+        ),
+        FakeCompletion(FakeMessage(tool_calls=[tool_call("call_2", "run_tests", {"command": "pytest"})])),
+    ]
+    _install_fake_client(monkeypatch, responses)
+
+    result = agent_loop.run_agent_loop(
+        requirement="Write add(a, b), with a passing test.", session_id="server-a-trace-session", max_iterations=5
+    )
+
+    trace = result["trace_log"]
+    assert any(e.get("tool") == "rag_search" and e.get("phase") == "test_generation" for e in trace)
+    # Server A's own forwarded write_code entry (for test_add.py, tagged with
+    # its filepath) must be distinguishable from Server B's separate,
+    # already-existing write_code entry that actually persists the file to
+    # this session's workspace disk.
+    assert any(
+        e.get("tool") == "write_code" and e.get("input", {}).get("filepath") == "test_add.py" and "query" not in e.get("input", {})
+        for e in trace
+    )
+
+
+def test_server_a_response_without_a_trace_field_does_not_crash(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Older/minimal Server A responses (or a malformed one) may omit
+    'trace' entirely - forwarding it must degrade gracefully, not raise.
+    """
+    monkeypatch.setattr(
+        agent_loop.server_a_client,
+        "generate_requirement",
+        lambda requirement: {
+            "requirement": requirement,
+            "test_files": {"test_add.py": "from solution import add\n\ndef test_add():\n    assert add(1, 2) == 3\n"},
+        },
+    )
+    responses = [
+        FakeCompletion(
+            FakeMessage(tool_calls=[tool_call("call_1", "write_code", {"filepath": "solution.py", "content": "def add(a, b):\n    return a + b\n"})])
+        ),
+        FakeCompletion(FakeMessage(tool_calls=[tool_call("call_2", "run_tests", {"command": "pytest"})])),
+    ]
+    _install_fake_client(monkeypatch, responses)
+
+    result = agent_loop.run_agent_loop(
+        requirement="Write add(a, b), with a passing test.", session_id="server-a-no-trace-session", max_iterations=5
+    )
+
+    assert result["status"] == "success"
+
+
 def test_eval_formatting_is_attached_to_run_tests_result(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         agent_loop,
